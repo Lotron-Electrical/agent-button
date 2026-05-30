@@ -1,0 +1,5 @@
+node_modules/
+*.log
+.agent-button.env
+.agent-button-spawns/
+.DS_Store
