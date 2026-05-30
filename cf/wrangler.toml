@@ -1,0 +1,21 @@
+name = "agent-button"
+main = "worker.js"
+compatibility_date = "2026-05-01"
+workers_dev = true
+
+[[durable_objects.bindings]]
+name = "QUEUE_DO"
+class_name = "QueueDO"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["QueueDO"]
+
+# Bundle the page as text and the icons as binary
+[[rules]]
+type = "Text"
+globs = ["**/*.html"]
+
+[[rules]]
+type = "Data"
+globs = ["**/*.png"]

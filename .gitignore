@@ -3,3 +3,9 @@ node_modules/
 .agent-button.env
 .agent-button-spawns/
 .DS_Store
+# cf build copies (sourced from public/) + wrangler cache
+cf/app.html
+cf/icon-192.png
+cf/icon-512.png
+cf/.wrangler/
+.dev.vars
