@@ -4,13 +4,13 @@
 //
 // Config: ~/.agent-button.env  (RELAY_URL, BUTTON_TOKEN, DEFAULT_CWD, CLAUDE_TAB)
 // Run:    node pc/poller.js
-const { spawn } = require('child_process');
+const { spawn, execSync } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
 // ---------- config ----------
-const cfgPath = path.join(os.homedir(), '.agent-button.env');
+const cfgPath = process.env.AGENT_BUTTON_ENV || path.join(os.homedir(), '.agent-button.env');
 if (!fs.existsSync(cfgPath)) {
   console.error('Missing config: ' + cfgPath + '\nCopy pc/agent-button.env.example to it and fill in RELAY_URL + BUTTON_TOKEN.');
   process.exit(1);
@@ -31,6 +31,31 @@ const SPAWN_DIR = path.join(os.homedir(), '.agent-button-spawns');
 fs.mkdirSync(SPAWN_DIR, { recursive: true });
 const LOG = path.join(SPAWN_DIR, 'poller.log');
 const headers = { Authorization: 'Bearer ' + TOKEN };
+
+// When Task Scheduler launches the poller it only inherits the minimal SYSTEM PATH,
+// so Git's bash, wt.exe (WindowsApps), npm and ~/.local/bin/claude are all missing.
+// Rebuild a full PATH from the registry + known dirs, and spawn bash by absolute path.
+function registryPath() {
+  try {
+    return execSync(
+      'powershell -NoProfile -Command "[Environment]::GetEnvironmentVariable(\'Path\',\'Machine\') + \';\' + [Environment]::GetEnvironmentVariable(\'Path\',\'User\')"',
+      { encoding: 'utf8', timeout: 8000 }
+    ).trim();
+  } catch (_) { return ''; }
+}
+const EXTRA_DIRS = [
+  'C:\\Program Files\\Git\\bin',
+  'C:\\Program Files\\Git\\usr\\bin',
+  path.join(os.homedir(), '.local', 'bin'),
+  path.join(os.homedir(), 'AppData', 'Local', 'Microsoft', 'WindowsApps'),
+  path.join(os.homedir(), 'AppData', 'Roaming', 'npm'),
+  'C:\\Program Files\\nodejs',
+  'C:\\Windows\\System32',
+  'C:\\Windows'
+];
+const SPAWN_ENV = { ...process.env, PATH: [...EXTRA_DIRS, registryPath(), process.env.PATH || ''].filter(Boolean).join(';') };
+const BASH = (cfg.BASH_PATH && fs.existsSync(cfg.BASH_PATH)) ? cfg.BASH_PATH
+  : ['C:\\Program Files\\Git\\bin\\bash.exe', 'C:\\Program Files\\Git\\usr\\bin\\bash.exe'].find((p) => fs.existsSync(p)) || 'bash';
 
 // ---------- helpers ----------
 function toMsys(p) {
@@ -71,16 +96,26 @@ ${task}
 }
 
 function spawnTab({ id, i, count, cwd, autoClose, promptText }) {
-  const title = `PhoneAgent-${id.slice(-5)}-${i}`;
-  const doneFlag = path.join(SPAWN_DIR, `agent-${id}-${i}.done`);
-  try { fs.unlinkSync(doneFlag); } catch (_) {}
-  const args = [CLAUDE_TAB, '--title', title, '--cwd', cwd, '--prompt', promptText];
-  if (autoClose) args.push('--done-flag', toMsys(doneFlag), '--grace-sec', '120');
-  else args.push('--no-auto-close');
-  const child = spawn('bash', args, { detached: true, stdio: 'ignore' });
-  child.on('error', (e) => log('spawn error for', title, e.message));
-  child.unref();
-  log('spawned', title, '(autoClose=' + autoClose + ')');
+  return new Promise((resolve) => {
+    const title = `PhoneAgent-${id.slice(-5)}-${i}`;
+    const doneFlag = path.join(SPAWN_DIR, `agent-${id}-${i}.done`);
+    try { fs.unlinkSync(doneFlag); } catch (_) {}
+    const args = [CLAUDE_TAB, '--title', title, '--cwd', cwd, '--prompt', promptText];
+    if (autoClose) args.push('--done-flag', toMsys(doneFlag), '--grace-sec', '120');
+    else args.push('--no-auto-close');
+    let settled = false;
+    const finish = (ok, why) => {
+      if (settled) return; settled = true;
+      log((ok ? 'spawned ' : 'spawn FAILED ') + title + (why ? ' (' + why + ')' : '') + ' [autoClose=' + autoClose + ']');
+      resolve(ok);
+    };
+    let child;
+    try { child = spawn(BASH, args, { detached: true, stdio: 'ignore', env: SPAWN_ENV }); }
+    catch (e) { return finish(false, e.message); }
+    child.on('error', (e) => finish(false, e.message));
+    child.on('spawn', () => { try { child.unref(); } catch (_) {} finish(true); });
+    setTimeout(() => { try { child.unref(); } catch (_) {} finish(true, 'assumed-ok'); }, 2000);
+  });
 }
 
 async function handle(t) {
@@ -90,13 +125,15 @@ async function handle(t) {
   const autoClose = t.autoClose !== false;
   log('TASK', id, 'count=' + count, 'cwd=' + cwd, JSON.stringify((t.task || '').slice(0, 70)));
   try {
+    let ok = 0;
     for (let i = 1; i <= count; i++) {
       const promptText = buildPrompt(t.task, i, count, id, cwd);
       fs.writeFileSync(path.join(SPAWN_DIR, `prompt-${id}-${i}.md`), promptText);
-      spawnTab({ id, i, count, cwd, autoClose, promptText });
+      if (await spawnTab({ id, i, count, cwd, autoClose, promptText })) ok++;
       await sleep(2500); // stagger MCP startup so tabs don't choke
     }
-    await ack(id, count, null);
+    const err = ok === 0 ? 'no tabs spawned (bash/wt not found?)' : (ok < count ? `only ${ok}/${count} spawned` : null);
+    await ack(id, ok, err);
   } catch (e) {
     log('handle error', e.message);
     await ack(id, 0, e.message);
