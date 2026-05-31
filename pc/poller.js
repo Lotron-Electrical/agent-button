@@ -224,7 +224,12 @@ async function pollChat() {
   log('chat turn done -> ' + job.agentId + (res.error ? (' ERROR: ' + res.error) : ''));
 }
 
-// ---------- spawn real interactive terminal agents (claude-tab.sh + Remote Control) ----------
+// ---------- spawn real ELEVATED interactive terminal agents via the ClaudeCodeAdmin task ----------
+// We DON'T spawn directly (the poller is non-elevated). Instead we drop a launcher into the
+// admin-queue and trigger the ClaudeCodeAdmin scheduled task (= the "Claude Code (Admin).lnk").
+// Its elevated wrapper (claude-code-admin-wrapper.ps1) runs our launcher, so the window is
+// truly elevated, identical to launching the shortcut by hand.
+const ADMIN_QUEUE = path.join(SPAWN_DIR, 'admin-queue');
 async function pollSpawn() {
   let s = null;
   try {
@@ -232,14 +237,28 @@ async function pollSpawn() {
     if (r.ok) { const j = await r.json(); if (!j.empty) s = j; }
   } catch (_) { return; }
   if (!s) return;
-  const cwd = s.cwd && String(s.cwd).trim() ? toMsys(String(s.cwd).trim()) : DEFAULT_CWD;
-  log('spawn terminal -> ' + s.name + ' (cwd ' + cwd + ')');
-  const args = [CLAUDE_TAB, '--title', s.name, '--cwd', cwd, '--prompt', String(s.prompt || ''), '--remote-control', s.name, '--no-auto-close'];
+  const cwdMsys = s.cwd && String(s.cwd).trim() ? toMsys(String(s.cwd).trim()) : DEFAULT_CWD;
+  try { fs.mkdirSync(ADMIN_QUEUE, { recursive: true }); } catch (_) {}
+  const promptFile = path.join(ADMIN_QUEUE, s.name + '.prompt.txt');
+  const launcherFile = path.join(ADMIN_QUEUE, s.name + '.sh');
+  const user = os.userInfo().username;
+  const pathDirs = [
+    '/c/Users/' + user + '/AppData/Local/Microsoft/WindowsApps',
+    '/c/Program Files/Git/bin', '/c/Program Files/Git/usr/bin',
+    '/c/Windows/System32', '/c/Windows', '/c/Program Files/nodejs',
+    '/c/Users/' + user + '/.local/bin', '/c/Users/' + user + '/AppData/Roaming/npm'
+  ].join(':');
+  const launcher =
+    'export PATH="' + pathDirs + ':$PATH"\n' +
+    bq(CLAUDE_TAB) + ' --title ' + bq(s.name) + ' --remote-control ' + bq(s.name) +
+    ' --cwd ' + bq(cwdMsys) + ' --no-auto-close --prompt "$(cat ' + bq(toMsys(promptFile)) + ')"\n';
   try {
-    const child = spawn(BASH, args, { env: SPAWN_ENV, detached: true, stdio: 'ignore' });
-    child.on('error', (e) => log('spawn terminal error ' + s.name + ': ' + e.message));
-    child.unref();
-  } catch (e) { log('spawn terminal failed ' + s.name + ': ' + e.message); }
+    fs.writeFileSync(promptFile, String(s.prompt || ''));
+    fs.writeFileSync(launcherFile, launcher);
+  } catch (e) { log('admin spawn write failed ' + s.name + ': ' + e.message); return; }
+  log('admin spawn -> ' + s.name + ' (queued; triggering ClaudeCodeAdmin task)');
+  try { execSync('schtasks /run /tn ClaudeCodeAdmin', { stdio: 'ignore', timeout: 12000 }); }
+  catch (e) { log('schtasks trigger failed for ' + s.name + ': ' + e.message); }
 }
 
 // ---------- PC stats (RAM / CPU) for the dashboard ----------
