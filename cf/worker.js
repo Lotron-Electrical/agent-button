@@ -19,7 +19,6 @@ const queueStub = (env) => env.QUEUE_DO.get(env.QUEUE_DO.idFromName('main'));
 // ---- endless mode ----
 const ENDLESS_PROTOCOL = '\n\n[ENDLESS MODE] Keep working autonomously until this task is fully solved. Make concrete progress every turn (read / edit / run / verify, do not just plan). When and ONLY when it is completely done and verified, include the exact marker [[SOLVED]] in your reply followed by a short summary. If it is not done yet, end your reply with the single concrete next step you will take, and you will automatically be asked to continue.';
 const CONTINUE_MSG = 'Continue working on the task now. Pick up exactly where you left off and make concrete progress this turn.';
-const ENDLESS_MAX_TURNS = 30;
 const wrapEndless = (t) => String(t || '') + ENDLESS_PROTOCOL;
 const isSolved = (r) => /\[\[\s*SOLVED\s*\]\]/i.test(String(r || ''));
 
@@ -276,16 +275,13 @@ export class QueueDO {
       if (ag.mode === 'endless' && !b.error) {
         if (isSolved(b.reply)) {
           ag.status = 'solved';
-        } else if ((ag.turns || 0) < ENDLESS_MAX_TURNS) {
-          // auto-continue: queue the next turn
+        } else {
+          // uncapped: keep auto-continuing until [[SOLVED]], an error, or the user hits Stop
           ag.turns = (ag.turns || 0) + 1;
           ag.status = 'thinking';
           const jobs = (await this.storage.get('jobs')) || [];
           jobs.push({ agentId: ag.id, message: wrapEndless(CONTINUE_MSG), ts: now });
           await this.storage.put('jobs', jobs);
-        } else {
-          ag.status = 'idle';
-          msgs.push({ role: 'system', text: 'Paused after ' + ENDLESS_MAX_TURNS + ' turns. Send a message to keep going, or stop/close.', ts: now + 1 });
         }
       } else {
         ag.status = b.error ? 'error' : 'idle';
