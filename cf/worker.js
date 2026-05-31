@@ -4,6 +4,7 @@
 // caches reads at the edge for up to 60s and would make the poller miss fresh tasks).
 import HTML from './app.html';
 import AGENTS from './agents.html';
+import CHAT from './chat.html';
 import ICON192 from './icon-192.png';
 import ICON512 from './icon-512.png';
 
@@ -38,6 +39,11 @@ export default {
     // agent dashboard page (capability URL)
     if (SECRET && p === '/p/' + SECRET + '/agents') {
       const html = AGENTS.replaceAll('__SECRET__', SECRET).replaceAll('__START__', '/p/' + SECRET);
+      return new Response(html, { headers: { 'content-type': 'text/html;charset=utf-8' } });
+    }
+    // in-app chat page (capability URL)
+    if (SECRET && p === '/p/' + SECRET + '/chat') {
+      const html = CHAT.replaceAll('__SECRET__', SECRET).replaceAll('__START__', '/p/' + SECRET);
       return new Response(html, { headers: { 'content-type': 'text/html;charset=utf-8' } });
     }
     if (SECRET && p === '/p/' + SECRET + '/manifest.webmanifest') {
@@ -94,15 +100,30 @@ export default {
       return queueStub(env).fetch('https://do/status/' + encodeURIComponent(id), { method: 'POST' });
     }
 
-    // ---- live agents: PC reports them, phone dashboard reads them ----
-    if (p === '/agents' && method === 'POST') {
+    // ---- in-app chat agents (headless, driven by the poller via claude -p --resume) ----
+    if (p === '/chat/new' && method === 'POST') {            // phone: start a new chat agent
       if (!authed()) return json({ error: 'unauthorized' }, 401);
-      const body = await req.text();
-      return queueStub(env).fetch('https://do/agentset', { method: 'POST', body });
+      return queueStub(env).fetch('https://do/chatnew', { method: 'POST', body: await req.text() });
     }
-    if (p === '/agents') {
+    if (p === '/chat/send' && method === 'POST') {           // phone: send a message to an agent
       if (!authed()) return json({ error: 'unauthorized' }, 401);
-      return queueStub(env).fetch('https://do/agentget', { method: 'POST' });
+      return queueStub(env).fetch('https://do/chatsend', { method: 'POST', body: await req.text() });
+    }
+    if (p === '/chat/get') {                                 // phone: fetch a conversation
+      if (!authed()) return json({ error: 'unauthorized' }, 401);
+      return queueStub(env).fetch('https://do/chatget?id=' + encodeURIComponent(url.searchParams.get('id') || ''), { method: 'POST' });
+    }
+    if (p === '/chat/jobnext') {                             // poller: pull the next turn to run
+      if (!authed()) return json({ error: 'unauthorized' }, 401);
+      return queueStub(env).fetch('https://do/jobnext', { method: 'POST' });
+    }
+    if (p === '/chat/result' && method === 'POST') {         // poller: post a turn's reply
+      if (!authed()) return json({ error: 'unauthorized' }, 401);
+      return queueStub(env).fetch('https://do/chatresult', { method: 'POST', body: await req.text() });
+    }
+    if (p === '/agents') {                                   // dashboard: list chat agents
+      if (!authed()) return json({ error: 'unauthorized' }, 401);
+      return queueStub(env).fetch('https://do/chatlist', { method: 'POST' });
     }
 
     return new Response('not found', { status: 404 });
@@ -154,13 +175,63 @@ export class QueueDO {
       return json({ id, status: 'unknown' });
     }
 
-    if (op === 'agentset') {
-      const body = await request.json();
-      await this.storage.put('agents', { agents: body.agents || [], host: body.host || null, ts: body.ts || Date.now() });
-      return json({ ok: true, n: (body.agents || []).length });
+    // ---- chat agents ----
+    if (op === 'chatnew') {
+      const b = await request.json(); // {title, message, cwd}
+      const id = crypto.randomUUID().slice(0, 8);
+      const now = Date.now();
+      const agents = (await this.storage.get('chatagents')) || [];
+      agents.unshift({ id, title: String(b.title || 'Agent').slice(0, 80), status: 'thinking', cwd: b.cwd || '', sessionId: null, createdAt: now, lastActivity: now, msgCount: 1 });
+      await this.storage.put('chatagents', agents.slice(0, 40));
+      await this.storage.put('msgs:' + id, [{ role: 'user', text: String(b.message || ''), ts: now }]);
+      const jobs = (await this.storage.get('jobs')) || [];
+      jobs.push({ agentId: id, message: String(b.message || ''), ts: now });
+      await this.storage.put('jobs', jobs);
+      return json({ ok: true, id });
     }
-    if (op === 'agentget') {
-      return json((await this.storage.get('agents')) || { agents: [], ts: 0 });
+    if (op === 'chatsend') {
+      const b = await request.json(); // {id, message}
+      const agents = (await this.storage.get('chatagents')) || [];
+      const ag = agents.find((a) => a.id === b.id);
+      if (!ag) return json({ error: 'no such agent' }, 404);
+      const now = Date.now();
+      const msgs = (await this.storage.get('msgs:' + b.id)) || [];
+      msgs.push({ role: 'user', text: String(b.message || ''), ts: now });
+      await this.storage.put('msgs:' + b.id, msgs);
+      ag.status = 'thinking'; ag.lastActivity = now; ag.msgCount = msgs.length;
+      await this.storage.put('chatagents', agents);
+      const jobs = (await this.storage.get('jobs')) || [];
+      jobs.push({ agentId: b.id, message: String(b.message || ''), ts: now });
+      await this.storage.put('jobs', jobs);
+      return json({ ok: true });
+    }
+    if (op === 'chatget') {
+      const id = new URL(request.url).searchParams.get('id');
+      const agents = (await this.storage.get('chatagents')) || [];
+      return json({ agent: agents.find((a) => a.id === id) || null, messages: (await this.storage.get('msgs:' + id)) || [] });
+    }
+    if (op === 'chatlist') {
+      return json({ agents: (await this.storage.get('chatagents')) || [], ts: Date.now() });
+    }
+    if (op === 'jobnext') {
+      const jobs = (await this.storage.get('jobs')) || [];
+      if (!jobs.length) return json({ empty: true });
+      const job = jobs.shift();
+      await this.storage.put('jobs', jobs);
+      const agents = (await this.storage.get('chatagents')) || [];
+      const ag = agents.find((a) => a.id === job.agentId) || {};
+      return json({ agentId: job.agentId, message: job.message, sessionId: ag.sessionId || null, cwd: ag.cwd || '' });
+    }
+    if (op === 'chatresult') {
+      const b = await request.json(); // {agentId, sessionId, reply, error}
+      const now = Date.now();
+      const msgs = (await this.storage.get('msgs:' + b.agentId)) || [];
+      msgs.push({ role: b.error ? 'system' : 'agent', text: b.error ? ('⚠ ' + b.error) : String(b.reply || '(no reply)'), ts: now });
+      await this.storage.put('msgs:' + b.agentId, msgs);
+      const agents = (await this.storage.get('chatagents')) || [];
+      const ag = agents.find((a) => a.id === b.agentId);
+      if (ag) { if (b.sessionId) ag.sessionId = b.sessionId; ag.status = b.error ? 'error' : 'idle'; ag.lastActivity = now; ag.msgCount = msgs.length; await this.storage.put('chatagents', agents); }
+      return json({ ok: true });
     }
 
     return new Response('do: not found', { status: 404 });

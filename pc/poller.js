@@ -159,6 +159,61 @@ async function reportAgents() {
   return agents.length;
 }
 
+// ---------- in-app chat: run one Claude Code turn per message, headless ----------
+const CHAT_DIR = path.join(SPAWN_DIR, 'chat');
+try { fs.mkdirSync(CHAT_DIR, { recursive: true }); } catch (_) {}
+const MAX_CHAT = 2;
+let chatInFlight = 0;
+const bq = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'"; // single-quote for bash
+
+function runClaudeTurn(job) {
+  return new Promise((resolve) => {
+    let msgFile;
+    try {
+      msgFile = path.join(CHAT_DIR, 'msg-' + job.agentId + '-' + process.hrtime.bigint() + '.txt');
+      fs.writeFileSync(msgFile, String(job.message || ''));
+    } catch (e) { return resolve({ error: 'write failed: ' + e.message }); }
+    const cwdMsys = job.cwd && String(job.cwd).trim() ? toMsys(String(job.cwd).trim()) : DEFAULT_CWD;
+    const resume = job.sessionId ? ('--resume ' + bq(job.sessionId) + ' ') : '';
+    const cmd = 'cd ' + bq(cwdMsys) + ' && claude -p "$(cat ' + bq(toMsys(msgFile)) + ')" ' + resume +
+                '--output-format json --dangerously-skip-permissions';
+    let out = '', err = '', child;
+    try { child = spawn(BASH, ['-c', cmd], { env: SPAWN_ENV, stdio: ['ignore', 'pipe', 'pipe'] }); }
+    catch (e) { return resolve({ error: 'spawn: ' + e.message }); }
+    child.stdout.on('data', (d) => { out += d; });
+    child.stderr.on('data', (d) => { err += d; });
+    child.on('error', (e) => resolve({ error: 'spawn: ' + e.message }));
+    child.on('close', (code) => {
+      try { fs.unlinkSync(msgFile); } catch (_) {}
+      let j = null; try { j = JSON.parse(out); } catch (_) {}
+      if (j && typeof j.result === 'string' && !j.is_error) resolve({ reply: j.result, sessionId: j.session_id || job.sessionId });
+      else if (j && typeof j.result === 'string') resolve({ error: 'agent: ' + j.result.slice(0, 400), sessionId: j.session_id || job.sessionId });
+      else resolve({ error: (err.trim().slice(0, 300) || ('claude exited ' + code + ' with no JSON')) });
+    });
+  });
+}
+
+async function pollChat() {
+  if (chatInFlight >= MAX_CHAT) return;
+  let job = null;
+  try {
+    const r = await fetch(RELAY + '/chat/jobnext', { headers });
+    if (r.ok) { const j = await r.json(); if (!j.empty) job = j; }
+  } catch (_) { return; }
+  if (!job) return;
+  chatInFlight++;
+  log('chat turn -> ' + job.agentId + (job.sessionId ? ' (resume)' : ' (new session)'));
+  const res = await runClaudeTurn(job);
+  try {
+    await fetch(RELAY + '/chat/result', {
+      method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ agentId: job.agentId, sessionId: res.sessionId || job.sessionId, reply: res.reply, error: res.error })
+    });
+  } catch (_) {}
+  chatInFlight--;
+  log('chat turn done -> ' + job.agentId + (res.error ? (' ERROR: ' + res.error) : ''));
+}
+
 async function handle(t) {
   const id = t.id;
   const count = Math.max(1, Math.min(4, t.count || 1));
@@ -204,7 +259,7 @@ async function loop() {
       // network blips are normal (relay cold start etc.) — log sparsely
       if (!loop._q) { log('poll error:', e.message); loop._q = 1; setTimeout(() => (loop._q = 0), 60000); }
     }
-    try { await reportAgents(); } catch (_) {}
+    pollChat(); // fire-and-forget; guarded by chatInFlight
     await sleep(POLL_MS);
   }
 }
