@@ -109,6 +109,10 @@ export default {
       if (!authed()) return json({ error: 'unauthorized' }, 401);
       return queueStub(env).fetch('https://do/chatsend', { method: 'POST', body: await req.text() });
     }
+    if (p === '/chat/close' && method === 'POST') {          // phone: close (remove) an agent
+      if (!authed()) return json({ error: 'unauthorized' }, 401);
+      return queueStub(env).fetch('https://do/chatclose', { method: 'POST', body: await req.text() });
+    }
     if (p === '/chat/get') {                                 // phone: fetch a conversation
       if (!authed()) return json({ error: 'unauthorized' }, 401);
       return queueStub(env).fetch('https://do/chatget?id=' + encodeURIComponent(url.searchParams.get('id') || ''), { method: 'POST' });
@@ -121,7 +125,11 @@ export default {
       if (!authed()) return json({ error: 'unauthorized' }, 401);
       return queueStub(env).fetch('https://do/chatresult', { method: 'POST', body: await req.text() });
     }
-    if (p === '/agents') {                                   // dashboard: list chat agents
+    if (p === '/stats' && method === 'POST') {               // poller: report PC RAM/CPU
+      if (!authed()) return json({ error: 'unauthorized' }, 401);
+      return queueStub(env).fetch('https://do/statsset', { method: 'POST', body: await req.text() });
+    }
+    if (p === '/agents') {                                   // dashboard: list chat agents + stats
       if (!authed()) return json({ error: 'unauthorized' }, 401);
       return queueStub(env).fetch('https://do/chatlist', { method: 'POST' });
     }
@@ -211,7 +219,11 @@ export class QueueDO {
       return json({ agent: agents.find((a) => a.id === id) || null, messages: (await this.storage.get('msgs:' + id)) || [] });
     }
     if (op === 'chatlist') {
-      return json({ agents: (await this.storage.get('chatagents')) || [], ts: Date.now() });
+      return json({ agents: (await this.storage.get('chatagents')) || [], stats: (await this.storage.get('stats')) || null, ts: Date.now() });
+    }
+    if (op === 'statsset') {
+      await this.storage.put('stats', await request.json());
+      return json({ ok: true });
     }
     if (op === 'jobnext') {
       const jobs = (await this.storage.get('jobs')) || [];
@@ -224,13 +236,23 @@ export class QueueDO {
     }
     if (op === 'chatresult') {
       const b = await request.json(); // {agentId, sessionId, reply, error}
+      const agents = (await this.storage.get('chatagents')) || [];
+      const ag = agents.find((a) => a.id === b.agentId);
+      if (!ag) return json({ ok: true, dropped: true }); // agent was closed mid-turn -> discard reply
       const now = Date.now();
       const msgs = (await this.storage.get('msgs:' + b.agentId)) || [];
       msgs.push({ role: b.error ? 'system' : 'agent', text: b.error ? ('⚠ ' + b.error) : String(b.reply || '(no reply)'), ts: now });
       await this.storage.put('msgs:' + b.agentId, msgs);
-      const agents = (await this.storage.get('chatagents')) || [];
-      const ag = agents.find((a) => a.id === b.agentId);
-      if (ag) { if (b.sessionId) ag.sessionId = b.sessionId; ag.status = b.error ? 'error' : 'idle'; ag.lastActivity = now; ag.msgCount = msgs.length; await this.storage.put('chatagents', agents); }
+      if (b.sessionId) ag.sessionId = b.sessionId;
+      ag.status = b.error ? 'error' : 'idle'; ag.lastActivity = now; ag.msgCount = msgs.length;
+      await this.storage.put('chatagents', agents);
+      return json({ ok: true });
+    }
+    if (op === 'chatclose') {
+      const b = await request.json(); // {id}
+      await this.storage.put('chatagents', ((await this.storage.get('chatagents')) || []).filter((a) => a.id !== b.id));
+      await this.storage.delete('msgs:' + b.id);
+      await this.storage.put('jobs', ((await this.storage.get('jobs')) || []).filter((j) => j.agentId !== b.id));
       return json({ ok: true });
     }
 

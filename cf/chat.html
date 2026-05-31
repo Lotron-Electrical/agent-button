@@ -23,6 +23,8 @@
     border-bottom:1px solid var(--line); background:linear-gradient(180deg,#1a1411,#0d0d0d);
   }
   .back{color:var(--accent2); text-decoration:none; font-size:20px; padding:2px 6px}
+  .hclose{flex:none; width:34px; height:34px; border-radius:9px; border:1px solid var(--line); background:var(--panel); color:var(--dim); font-size:14px; display:flex; align-items:center; justify-content:center; padding:0}
+  .hclose:active{background:rgba(217,101,90,.18); color:var(--err); border-color:var(--err)}
   .htitle{flex:1; min-width:0}
   .htitle .n{font-size:15px; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
   .htitle .s{font-size:11px; color:var(--dim); letter-spacing:.3px}
@@ -53,6 +55,7 @@
   <header>
     <a class="back" href="__START__/agents" title="back">‹</a>
     <div class="htitle"><div class="n" id="hname">Agent</div><div class="s" id="hstatus">…</div></div>
+    <button class="hclose" id="hclose" title="close agent" aria-label="close agent">✕</button>
   </header>
   <div id="log"></div>
   <div class="composer">
@@ -110,6 +113,11 @@ async function send(){
 }
 
 $('send').addEventListener('click', send);
+$('hclose').addEventListener('click', async ()=>{
+  if(!confirm('Close this agent? The chat will be removed.')) return;
+  try{ await api('/chat/close',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ id:ID }) }); }catch(e){}
+  location.href = START + '/agents';
+});
 $('box').addEventListener('keydown', (e)=>{ if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); send(); } });
 $('box').addEventListener('input', ()=>{ const b=$('box'); b.style.height='46px'; b.style.height=Math.min(120,b.scrollHeight)+'px'; });
 

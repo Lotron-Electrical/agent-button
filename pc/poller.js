@@ -214,6 +214,36 @@ async function pollChat() {
   log('chat turn done -> ' + job.agentId + (res.error ? (' ERROR: ' + res.error) : ''));
 }
 
+// ---------- PC stats (RAM / CPU) for the dashboard ----------
+let prevCpu = os.cpus();
+function cpuPercent() {
+  const cur = os.cpus();
+  let idle = 0, total = 0;
+  for (let i = 0; i < cur.length && i < prevCpu.length; i++) {
+    const a = prevCpu[i].times, b = cur[i].times;
+    idle += (b.idle - a.idle);
+    total += (b.user - a.user) + (b.nice - a.nice) + (b.sys - a.sys) + (b.irq - a.irq) + (b.idle - a.idle);
+  }
+  prevCpu = cur;
+  return total > 0 ? Math.max(0, Math.min(100, Math.round(100 * (1 - idle / total)))) : 0;
+}
+async function reportStats() {
+  const total = os.totalmem() / 1073741824, free = os.freemem() / 1073741824;
+  const stats = {
+    host: os.hostname(),
+    cpuPct: cpuPercent(),
+    cores: os.cpus().length,
+    ramUsedGB: +(total - free).toFixed(1),
+    ramTotalGB: +total.toFixed(1),
+    ramPct: total > 0 ? Math.round(100 * (total - free) / total) : 0,
+    uptimeH: +(os.uptime() / 3600).toFixed(1),
+    ts: Date.now()
+  };
+  try {
+    await fetch(RELAY + '/stats', { method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify(stats) });
+  } catch (_) {}
+}
+
 async function handle(t) {
   const id = t.id;
   const count = Math.max(1, Math.min(4, t.count || 1));
@@ -260,6 +290,7 @@ async function loop() {
       if (!loop._q) { log('poll error:', e.message); loop._q = 1; setTimeout(() => (loop._q = 0), 60000); }
     }
     pollChat(); // fire-and-forget; guarded by chatInFlight
+    reportStats(); // fire-and-forget; reports RAM/CPU to the dashboard
     await sleep(POLL_MS);
   }
 }

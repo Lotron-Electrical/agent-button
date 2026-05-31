@@ -19,32 +19,45 @@
     color:var(--ink); font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
     min-height:100%; padding:max(18px,env(safe-area-inset-top)) 16px calc(18px + env(safe-area-inset-bottom));
   }
-  header{display:flex; align-items:center; gap:10px; margin-bottom:6px}
+  header{display:flex; align-items:center; gap:10px; margin-bottom:12px}
   .dot{width:10px; height:10px; border-radius:50%; background:var(--accent); box-shadow:0 0 12px var(--accent)}
   h1{font-size:17px; margin:0; letter-spacing:.5px; font-weight:600; flex:1}
   h1 span{color:var(--dim); font-weight:400}
   .spawnlink{font-size:13px; color:var(--accent2); text-decoration:none; border:1px solid var(--line); padding:7px 11px; border-radius:10px; white-space:nowrap}
   .spawnlink:active{background:var(--panel)}
-  .sub{font-size:12px; color:var(--dim); margin:8px 2px 16px; letter-spacing:.3px; display:flex; align-items:center; gap:7px}
-  .sub.offline{color:var(--err)}
-  .sub .live{width:7px;height:7px;border-radius:50%;background:var(--ok);box-shadow:0 0 8px var(--ok)}
+  /* stats bar */
+  .stats{background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:11px 13px; margin-bottom:14px}
+  .srow{display:flex; align-items:center; gap:10px; font-size:12px; margin:5px 0}
+  .srow .lab{width:30px; color:var(--dim); letter-spacing:.4px}
+  .srow .bar{flex:1; height:8px; background:var(--panel2); border-radius:6px; overflow:hidden}
+  .srow .bar i{display:block; height:100%; border-radius:6px; background:linear-gradient(90deg,var(--accent2),var(--accent)); transition:width .4s}
+  .srow .bar i.hot{background:linear-gradient(90deg,#d9a84f,#d9655a)}
+  .srow .val{width:96px; text-align:right; color:var(--ink)}
+  .shost{font-size:11px; color:var(--dim); margin-top:6px; display:flex; align-items:center; gap:6px}
+  .shost .live{width:7px;height:7px;border-radius:50%;background:var(--ok);box-shadow:0 0 8px var(--ok)}
+  .shost.off{color:var(--err)} .shost.off .live{background:var(--err);box-shadow:0 0 8px var(--err)}
+  .sub{font-size:12px; color:var(--dim); margin:0 2px 14px; letter-spacing:.3px}
+  /* cards */
   a.card{
-    display:block; text-decoration:none; color:inherit;
+    display:block; text-decoration:none; color:inherit; position:relative;
     background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:14px; margin-bottom:12px;
   }
   a.card:active{border-color:var(--accent)}
-  .top{display:flex; align-items:center; gap:10px; margin-bottom:8px}
+  .top{display:flex; align-items:center; gap:8px; margin-bottom:8px}
   .name{font-size:16px; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1}
   .badge{font-size:11px; padding:3px 9px; border-radius:20px; letter-spacing:.4px; text-transform:uppercase; font-weight:600; white-space:nowrap}
   .badge.busy{color:#1a0f0a; background:var(--accent); animation:pulse 1.6s ease-in-out infinite}
   .badge.idle{color:var(--ok); background:rgba(95,184,122,.14); border:1px solid rgba(95,184,122,.35)}
   .badge.err{color:var(--err); background:rgba(217,101,90,.14); border:1px solid rgba(217,101,90,.4)}
   .badge.other{color:var(--dim); background:var(--panel2); border:1px solid var(--line)}
+  .close{width:30px; height:30px; flex:none; border-radius:8px; border:1px solid var(--line); background:var(--panel2);
+         color:var(--dim); font-size:17px; line-height:1; display:flex; align-items:center; justify-content:center; padding:0}
+  .close:active{background:rgba(217,101,90,.18); color:var(--err); border-color:var(--err)}
   @keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(193,95,60,.5)}50%{box-shadow:0 0 0 6px rgba(193,95,60,0)}}
   .meta{font-size:12px; color:var(--dim); margin-bottom:12px; line-height:1.5; word-break:break-all}
-  .chat{display:block; text-align:center; padding:12px; border-radius:11px; font-size:15px; font-weight:600;
+  .chatbtn{display:block; text-align:center; padding:12px; border-radius:11px; font-size:15px; font-weight:600;
         color:#1a0f0a; background:linear-gradient(135deg,var(--accent2),var(--accent)); box-shadow:0 6px 18px rgba(193,95,60,.3)}
-  .empty{text-align:center; color:var(--dim); font-size:14px; line-height:2; margin-top:60px}
+  .empty{text-align:center; color:var(--dim); font-size:14px; line-height:2; margin-top:50px}
   .empty a{color:var(--accent2)}
   .foot{text-align:center; color:var(--dim); font-size:11px; margin-top:18px; opacity:.7}
 </style>
@@ -55,21 +68,34 @@
     <h1>AGENTS <span>// your PC</span></h1>
     <a class="spawnlink" href="__START__">+ New</a>
   </header>
+  <div class="stats" id="stats" style="display:none"></div>
   <div class="sub" id="sub">loading…</div>
   <div id="list"></div>
-  <div class="foot">tap an agent to open its chat · refreshes every 3s</div>
+  <div class="foot">tap an agent to chat · × to close · refreshes every 3s</div>
 
 <script>
 const SECRET = "__SECRET__";
 const START = "__START__";
 const $ = (id) => document.getElementById(id);
 
-function api(p){ return fetch(p, { headers: { Authorization: 'Bearer ' + SECRET } }); }
+function api(p, opts){ return fetch(p, { ...(opts||{}), headers: { Authorization: 'Bearer ' + SECRET, ...((opts&&opts.headers)||{}) } }); }
 function ago(ts){ if(!ts) return ''; let s=Math.max(0,Math.round((Date.now()-ts)/1000)); if(s<60)return s+'s'; if(s<3600)return Math.round(s/60)+'m'; return Math.round(s/3600)+'h'; }
 function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 function shortCwd(c){ if(!c) return ''; return c.replace(/^[A-Za-z]:\\Users\\[^\\]+/, '~').replace(/^\/[a-z]\/Users\/[^/]+/i,'~').replace(/\\/g,'/'); }
 function statusInfo(s){ s=String(s||'').toLowerCase(); if(s==='thinking'||s==='busy')return{label:'working',cls:'busy'}; if(s==='idle')return{label:'idle',cls:'idle'}; if(s==='error')return{label:'error',cls:'err'}; return{label:s||'new',cls:'other'}; }
-function setHead(cls, html){ const h=$('sub'); h.className='sub '+cls; h.innerHTML=html; }
+
+function renderStats(st){
+  const el = $('stats');
+  if(!st || !st.ts){ el.style.display='none'; return; }
+  el.style.display='block';
+  const fresh = (Date.now()-st.ts) < 20000;
+  const cpu = Math.max(0,Math.min(100, st.cpuPct||0));
+  const ram = Math.max(0,Math.min(100, st.ramPct||0));
+  el.innerHTML =
+    '<div class="srow"><span class="lab">CPU</span><div class="bar"><i class="'+(cpu>85?'hot':'')+'" style="width:'+cpu+'%"></i></div><span class="val">'+cpu+'%'+(st.cores?' · '+st.cores+'c':'')+'</span></div>'+
+    '<div class="srow"><span class="lab">RAM</span><div class="bar"><i class="'+(ram>88?'hot':'')+'" style="width:'+ram+'%"></i></div><span class="val">'+(st.ramUsedGB||0)+' / '+(st.ramTotalGB||0)+' GB</span></div>'+
+    '<div class="shost'+(fresh?'':' off')+'"><span class="live"></span>'+esc(st.host||'PC')+(fresh?' · online '+ago(st.ts)+' ago':' · last seen '+ago(st.ts)+' ago')+(st.uptimeH?' · up '+st.uptimeH+'h':'')+'</div>';
+}
 
 function render(agents){
   if(!agents.length){ $('list').innerHTML = '<div class="empty">No agents yet.<br>Start one and chat with it right here.<br><a href="'+START+'">New agent →</a></div>'; return; }
@@ -78,19 +104,32 @@ function render(agents){
     const meta = [shortCwd(a.cwd), (a.msgCount ? a.msgCount+' msg' : ''), a.lastActivity ? 'active '+ago(a.lastActivity)+' ago' : ''].filter(Boolean).join(' · ');
     return '<a class="card" href="'+START+'/chat?id='+encodeURIComponent(a.id)+'">'+
            '<div class="top"><span class="name">'+esc(a.title||a.id)+'</span>'+
-           '<span class="badge '+st.cls+'">'+esc(st.label)+'</span></div>'+
+           '<span class="badge '+st.cls+'">'+esc(st.label)+'</span>'+
+           '<button class="close" data-id="'+esc(a.id)+'" aria-label="close agent">✕</button></div>'+
            (meta ? '<div class="meta">'+esc(meta)+'</div>' : '')+
-           '<span class="chat">Open chat ›</span></a>';
+           '<span class="chatbtn">Open chat ›</span></a>';
   }).join('');
 }
+
+$('list').addEventListener('click', async (e) => {
+  const btn = e.target.closest('.close');
+  if (!btn) return;
+  e.preventDefault(); e.stopPropagation();
+  const id = btn.dataset.id;
+  if (!confirm('Close this agent? Its chat will be removed.')) return;
+  btn.textContent = '·'; btn.disabled = true;
+  try { await api('/chat/close', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ id }) }); } catch(e){}
+  refresh();
+});
 
 async function refresh(){
   let data;
   try { data = await (await api('/agents')).json(); }
-  catch(e){ setHead('offline', 'can’t reach relay'); return; }
+  catch(e){ $('sub').textContent = 'can’t reach relay'; return; }
   const agents = data.agents || [];
   const working = agents.filter(a => (a.status==='thinking'||a.status==='busy')).length;
-  setHead('', '<span class="live"></span>'+agents.length+' agent'+(agents.length===1?'':'s')+(working?' · '+working+' working':''));
+  renderStats(data.stats);
+  $('sub').innerHTML = agents.length+' agent'+(agents.length===1?'':'s')+(working?' · '+working+' working':'');
   render(agents);
 }
 refresh();
