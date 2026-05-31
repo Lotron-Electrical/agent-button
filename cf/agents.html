@@ -89,7 +89,7 @@ function api(p, opts){ return fetch(p, { ...(opts||{}), headers: { Authorization
 function ago(ts){ if(!ts) return ''; let s=Math.max(0,Math.round((Date.now()-ts)/1000)); if(s<60)return s+'s'; if(s<3600)return Math.round(s/60)+'m'; return Math.round(s/3600)+'h'; }
 function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 function shortCwd(c){ if(!c) return ''; return c.replace(/^[A-Za-z]:\\Users\\[^\\]+/, '~').replace(/^\/[a-z]\/Users\/[^/]+/i,'~').replace(/\\/g,'/'); }
-function statusInfo(s){ s=String(s||'').toLowerCase(); if(s==='thinking'||s==='busy')return{label:'working',cls:'busy'}; if(s==='idle')return{label:'idle',cls:'idle'}; if(s==='live')return{label:'live',cls:'idle'}; if(s==='error')return{label:'error',cls:'err'}; return{label:s||'new',cls:'other'}; }
+function statusInfo(s){ s=String(s||'').toLowerCase(); if(s==='thinking'||s==='busy')return{label:'working',cls:'busy'}; if(s==='idle')return{label:'idle',cls:'idle'}; if(s==='live')return{label:'live',cls:'idle'}; if(s==='solved')return{label:'solved',cls:'idle'}; if(s==='error')return{label:'error',cls:'err'}; return{label:s||'new',cls:'other'}; }
 
 function renderStats(st){
   const el = $('stats');
@@ -120,7 +120,8 @@ function render(agents){
   if(!agents.length){ $('list').innerHTML = '<div class="empty">No agents yet.<br>Start one and chat with it right here.<br><a href="'+START+'">New agent →</a></div>'; return; }
   $('list').innerHTML = agents.map(a => {
     const st = statusInfo(a.status);
-    const meta = [shortCwd(a.cwd), (a.msgCount ? a.msgCount+' msg' : ''), a.lastActivity ? 'active '+ago(a.lastActivity)+' ago' : ''].filter(Boolean).join(' · ');
+    const endlessTag = a.mode==='endless' ? ('∞ endless'+(a.status==='thinking'?' · turn '+(a.turns||0):'')) : '';
+    const meta = [endlessTag, shortCwd(a.cwd), (a.msgCount ? a.msgCount+' msg' : ''), a.lastActivity ? 'active '+ago(a.lastActivity)+' ago' : ''].filter(Boolean).join(' · ');
     return '<a class="card" href="'+START+'/chat?id='+encodeURIComponent(a.id)+'">'+
            '<div class="top"><span class="name">'+esc(a.title||a.id)+'</span>'+
            '<span class="badge '+st.cls+'">'+esc(st.label)+'</span>'+

@@ -16,6 +16,13 @@ const pngResp = (buf) =>
 // The one queue instance every request talks to.
 const queueStub = (env) => env.QUEUE_DO.get(env.QUEUE_DO.idFromName('main'));
 
+// ---- endless mode ----
+const ENDLESS_PROTOCOL = '\n\n[ENDLESS MODE] Keep working autonomously until this task is fully solved. Make concrete progress every turn (read / edit / run / verify, do not just plan). When and ONLY when it is completely done and verified, include the exact marker [[SOLVED]] in your reply followed by a short summary. If it is not done yet, end your reply with the single concrete next step you will take, and you will automatically be asked to continue.';
+const CONTINUE_MSG = 'Continue working on the task now. Pick up exactly where you left off and make concrete progress this turn.';
+const ENDLESS_MAX_TURNS = 30;
+const wrapEndless = (t) => String(t || '') + ENDLESS_PROTOCOL;
+const isSolved = (r) => /\[\[\s*SOLVED\s*\]\]/i.test(String(r || ''));
+
 export default {
   async fetch(req, env) {
     const SECRET = env.BUTTON_TOKEN || '';
@@ -113,6 +120,10 @@ export default {
       if (!authed()) return json({ error: 'unauthorized' }, 401);
       return queueStub(env).fetch('https://do/chatclose', { method: 'POST', body: await req.text() });
     }
+    if (p === '/chat/stop' && method === 'POST') {           // phone: stop endless mode on an agent
+      if (!authed()) return json({ error: 'unauthorized' }, 401);
+      return queueStub(env).fetch('https://do/chatstop', { method: 'POST', body: await req.text() });
+    }
     if (p === '/chat/get') {                                 // phone: fetch a conversation
       if (!authed()) return json({ error: 'unauthorized' }, 401);
       return queueStub(env).fetch('https://do/chatget?id=' + encodeURIComponent(url.searchParams.get('id') || ''), { method: 'POST' });
@@ -189,15 +200,16 @@ export class QueueDO {
 
     // ---- chat agents ----
     if (op === 'chatnew') {
-      const b = await request.json(); // {title, message, cwd}
+      const b = await request.json(); // {title, message, cwd, mode}
       const id = crypto.randomUUID().slice(0, 8);
       const now = Date.now();
+      const endless = b.mode === 'endless';
       const agents = (await this.storage.get('chatagents')) || [];
-      agents.unshift({ id, title: String(b.title || 'Agent').slice(0, 80), status: 'thinking', cwd: b.cwd || '', sessionId: null, createdAt: now, lastActivity: now, msgCount: 1 });
+      agents.unshift({ id, title: String(b.title || 'Agent').slice(0, 80), status: 'thinking', mode: endless ? 'endless' : 'chat', turns: 0, cwd: b.cwd || '', sessionId: null, createdAt: now, lastActivity: now, msgCount: 1 });
       await this.storage.put('chatagents', agents.slice(0, 40));
       await this.storage.put('msgs:' + id, [{ role: 'user', text: String(b.message || ''), ts: now }]);
       const jobs = (await this.storage.get('jobs')) || [];
-      jobs.push({ agentId: id, message: String(b.message || ''), ts: now });
+      jobs.push({ agentId: id, message: endless ? wrapEndless(b.message) : String(b.message || ''), ts: now });
       await this.storage.put('jobs', jobs);
       return json({ ok: true, id });
     }
@@ -211,9 +223,10 @@ export class QueueDO {
       msgs.push({ role: 'user', text: String(b.message || ''), ts: now });
       await this.storage.put('msgs:' + b.id, msgs);
       ag.status = 'thinking'; ag.lastActivity = now; ag.msgCount = msgs.length;
+      if (ag.mode === 'endless') ag.turns = 0; // a new user directive resets the turn budget
       await this.storage.put('chatagents', agents);
       const jobs = (await this.storage.get('jobs')) || [];
-      jobs.push({ agentId: b.id, message: String(b.message || ''), ts: now });
+      jobs.push({ agentId: b.id, message: ag.mode === 'endless' ? wrapEndless(b.message) : String(b.message || ''), ts: now });
       await this.storage.put('jobs', jobs);
       return json({ ok: true });
     }
@@ -258,9 +271,27 @@ export class QueueDO {
       const now = Date.now();
       const msgs = (await this.storage.get('msgs:' + b.agentId)) || [];
       msgs.push({ role: b.error ? 'system' : 'agent', text: b.error ? ('⚠ ' + b.error) : String(b.reply || '(no reply)'), ts: now });
-      await this.storage.put('msgs:' + b.agentId, msgs);
       if (b.sessionId) ag.sessionId = b.sessionId;
-      ag.status = b.error ? 'error' : 'idle'; ag.lastActivity = now; ag.msgCount = msgs.length;
+      ag.lastActivity = now;
+      if (ag.mode === 'endless' && !b.error) {
+        if (isSolved(b.reply)) {
+          ag.status = 'solved';
+        } else if ((ag.turns || 0) < ENDLESS_MAX_TURNS) {
+          // auto-continue: queue the next turn
+          ag.turns = (ag.turns || 0) + 1;
+          ag.status = 'thinking';
+          const jobs = (await this.storage.get('jobs')) || [];
+          jobs.push({ agentId: ag.id, message: wrapEndless(CONTINUE_MSG), ts: now });
+          await this.storage.put('jobs', jobs);
+        } else {
+          ag.status = 'idle';
+          msgs.push({ role: 'system', text: 'Paused after ' + ENDLESS_MAX_TURNS + ' turns. Send a message to keep going, or stop/close.', ts: now + 1 });
+        }
+      } else {
+        ag.status = b.error ? 'error' : 'idle';
+      }
+      await this.storage.put('msgs:' + b.agentId, msgs);
+      ag.msgCount = msgs.length;
       await this.storage.put('chatagents', agents);
       return json({ ok: true });
     }
@@ -269,6 +300,17 @@ export class QueueDO {
       await this.storage.put('chatagents', ((await this.storage.get('chatagents')) || []).filter((a) => a.id !== b.id));
       await this.storage.delete('msgs:' + b.id);
       await this.storage.put('jobs', ((await this.storage.get('jobs')) || []).filter((j) => j.agentId !== b.id));
+      return json({ ok: true });
+    }
+    if (op === 'chatstop') {
+      const b = await request.json(); // {id}  -> stop endless looping, keep the agent
+      const agents = (await this.storage.get('chatagents')) || [];
+      const ag = agents.find((a) => a.id === b.id);
+      if (ag) { ag.mode = 'chat'; if (ag.status === 'thinking') ag.status = 'idle'; ag.lastActivity = Date.now(); await this.storage.put('chatagents', agents); }
+      await this.storage.put('jobs', ((await this.storage.get('jobs')) || []).filter((j) => j.agentId !== b.id));
+      const msgs = (await this.storage.get('msgs:' + b.id)) || [];
+      msgs.push({ role: 'system', text: 'Endless mode stopped. The agent will wait for your next message.', ts: Date.now() });
+      await this.storage.put('msgs:' + b.id, msgs);
       return json({ ok: true });
     }
 

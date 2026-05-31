@@ -39,6 +39,11 @@
   .thinking-row{align-self:flex-start; display:flex; align-items:center; gap:8px; color:var(--dim); font-size:13px; padding:4px 2px}
   .spin{width:13px;height:13px;border:2px solid var(--accent);border-top-color:transparent;border-radius:50%;animation:s .7s linear infinite}
   @keyframes s{to{transform:rotate(360deg)}}
+  .htitle .s.solved{color:var(--ok)}
+  .endlessbar{display:none; align-items:center; gap:10px; padding:10px 12px; border-top:1px solid var(--line); background:rgba(193,95,60,.09); font-size:13px; color:var(--accent2)}
+  .endlessbar .lbl{flex:1}
+  .stopbtn{border:1px solid var(--err); background:rgba(217,101,90,.15); color:var(--err); border-radius:9px; padding:7px 15px; font:inherit; font-size:13px; font-weight:600}
+  .stopbtn:active{background:rgba(217,101,90,.3)}
   .composer{display:flex; gap:8px; padding:10px 12px calc(10px + env(safe-area-inset-bottom)); border-top:1px solid var(--line); background:var(--bg)}
   textarea{
     flex:1; resize:none; background:var(--panel); color:var(--ink); border:1px solid var(--line); border-radius:12px;
@@ -58,6 +63,7 @@
     <button class="hclose" id="hclose" title="close agent" aria-label="close agent">✕</button>
   </header>
   <div id="log"></div>
+  <div class="endlessbar" id="endlessbar"><div class="spin"></div><span class="lbl">Working…</span><button class="stopbtn" id="stopbtn">Stop</button></div>
   <div class="composer">
     <textarea id="box" placeholder="Message this agent…" rows="1"></textarea>
     <button class="send" id="send">Send</button>
@@ -77,16 +83,26 @@ function atBottom(){ const l=$('log'); return l.scrollHeight - l.scrollTop - l.c
 function render(agent, messages){
   if (agent){ $('hname').textContent = agent.title || ('Agent '+ID); }
   thinking = agent && agent.status === 'thinking';
+  const endless = agent && agent.mode === 'endless';
+  const solved = agent && agent.status === 'solved';
+  const cwdStr = agent && agent.cwd ? (' · '+agent.cwd.replace(/^[A-Za-z]:\\Users\\[^\\]+/,'~').replace(/^\/[a-z]\/Users\/[^/]+/i,'~').replace(/\\/g,'/')) : '';
   const st = $('hstatus');
-  st.className = 's' + (thinking?' thinking':(agent&&agent.status==='error'?' error':''));
-  st.textContent = agent ? (thinking ? 'thinking…' : (agent.status||'idle')) + (agent.cwd?(' · '+agent.cwd.replace(/^[A-Za-z]:\\Users\\[^\\]+/,'~').replace(/^\/[a-z]\/Users\/[^/]+/i,'~').replace(/\\/g,'/')):'') : 'not found';
+  let scls='s', slabel;
+  if (solved){ scls='s solved'; slabel='✓ solved'; }
+  else if (thinking){ scls='s thinking'; slabel = endless ? ('working · turn '+(agent.turns||0)) : 'thinking…'; }
+  else if (agent && agent.status==='error'){ scls='s error'; slabel='error'; }
+  else { slabel = agent ? (agent.status||'idle') : 'not found'; }
+  st.className = scls; st.textContent = slabel + cwdStr;
+  const bar = $('endlessbar');
+  if (endless && thinking){ bar.style.display='flex'; bar.querySelector('.lbl').textContent='Working autonomously · turn '+(agent.turns||0); }
+  else { bar.style.display='none'; }
   const stick = atBottom();
   const rows = (messages||[]).map(m=>{
     const cls = m.role==='user'?'user':(m.role==='system'?'system':'agent');
     const who = m.role==='agent'?'<div class="who">agent</div>':'';
     return '<div class="msg '+cls+'">'+who+esc(m.text)+'</div>';
   });
-  if (thinking) rows.push('<div class="thinking-row"><div class="spin"></div>working on your message…</div>');
+  if (thinking && !endless) rows.push('<div class="thinking-row"><div class="spin"></div>working on your message…</div>');
   if (!messages || !messages.length){ if(!thinking) rows.push('<div class="empty">No messages yet.</div>'); }
   $('log').innerHTML = rows.join('');
   if (stick) $('log').scrollTop = $('log').scrollHeight;
@@ -117,6 +133,11 @@ $('hclose').addEventListener('click', async ()=>{
   if(!confirm('Close this agent? The chat will be removed.')) return;
   try{ await api('/chat/close',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ id:ID }) }); }catch(e){}
   location.href = START + '/agents';
+});
+$('stopbtn').addEventListener('click', async ()=>{
+  $('stopbtn').disabled = true;
+  try{ await api('/chat/stop',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ id:ID }) }); }catch(e){}
+  setTimeout(()=>{ $('stopbtn').disabled = false; refresh(); }, 400);
 });
 $('box').addEventListener('keydown', (e)=>{ if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); send(); } });
 $('box').addEventListener('input', ()=>{ const b=$('box'); b.style.height='46px'; b.style.height=Math.min(120,b.scrollHeight)+'px'; });
