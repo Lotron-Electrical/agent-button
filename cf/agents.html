@@ -126,9 +126,8 @@ function renderSolves(solves){
     const gen = '∞ generation '+(s.generation||1);
     let st, line, actions='';
     if(s.status==='solved'){ st={label:'solved',cls:'idle'}; line=gen+(s.summary?' · '+s.summary:''); }
-    else if(s.status==='awaiting'){ st={label:'needs you',cls:'err'}; line=gen+' · ⏸ '+((s.awaiting&&s.awaiting.need)||'waiting on you'); actions='<button class="srelay cont" data-id="'+esc(s.id)+'">Give it the above, then Resume ›</button>'; }
     else if(s.status==='stopped'){ st={label:'stopped',cls:'other'}; line=gen+' · stopped'; actions='<button class="srelay cont" data-id="'+esc(s.id)+'">Resume ›</button>'; }
-    else { st={label:'solving',cls:'busy'}; line=gen+(s.autoContinues?' · '+s.autoContinues+' auto-continued':'')+(s.lastBeat?' · beat '+ago(s.lastBeat)+' ago':''); actions='<button class="srelay stop" data-id="'+esc(s.id)+'">Stop relay</button>'; }
+    else { st={label:'solving',cls:'busy'}; line=gen+(s.autoContinues?' · '+s.autoContinues+' auto-continued':'')+(s.lastBeat?' · beat '+ago(s.lastBeat)+' ago':'')+((s.wants&&s.wants.need)?' · 💡 would help (optional): '+s.wants.need:''); actions='<button class="srelay stop" data-id="'+esc(s.id)+'">Stop relay</button>'; }
     return '<div class="extcard"><div class="top"><span class="name">'+esc(s.title||s.id)+'</span><span class="badge '+st.cls+'">'+esc(st.label)+'</span><button class="close sdel" data-id="'+esc(s.id)+'" aria-label="remove relay">✕</button></div><div class="meta">'+esc(line)+'</div>'+actions+'</div>';
   }).join('');
 }
@@ -172,7 +171,7 @@ $('solveswrap').addEventListener('click', async (e) => {
   const id = btn.dataset.id;
   const stop = btn.classList.contains('stop');
   if (stop && !confirm('Stop this relay? It will not spawn another generation. Close its terminal window separately if one is open.')) return;
-  if (!stop && !confirm('Resume this relay? Only do this once you have given the agent what the card says it needs — Resume just continues, it does not collect anything from you here.')) { return; }
+  if (!stop && !confirm('Resume this stopped relay?')) { return; }
   btn.disabled = true; btn.textContent = stop ? 'stopping…' : 'resuming…';
   try { await api(stop ? '/solve/stop' : '/solve/next', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ solveId: id, force: true }) }); } catch(e){}
   refresh();

@@ -45,19 +45,17 @@ At the START of every turn, and again right before you launch any long-running c
    curl -s -X POST '${relay}/solve/beat' ${auth} -d '{"solveId":"${solveId}"}'
 A watchdog automatically spawns your successor if you go silent for 30 minutes. Beat often. If a command will run longer than that, start it in the background and keep beating while it runs.
 
-# IF YOU GET STUCK BUT THE WORK CAN CONTINUE (never just give up)
+# WHEN YOU GET STUCK OR RUN LOW ON CONTEXT (never just give up)
 When you hit a wall, run low on context, or judge the problem too large to finish this session:
 1. Write a thorough, honest handover to ${ho}.
 2. Hand off to your successor (it reads the handover and continues):
-   curl -s -X POST '${relay}/solve/next' ${auth} -d '{"solveId":"${solveId}"}'
-3. Then stop. The successor takes over.
+   curl -s -X POST '${relay}/solve/next' ${auth} -d '{"solveId":"${solveId}","gen":${gen}}'
+3. Then stop. The successor takes over and keeps working.
 
-# IF YOU ARE BLOCKED ON SOMETHING ONLY A HUMAN CAN PROVIDE
-If real progress is impossible without an external input only Lloyd can give (a file, a login or credential, a gated/paywalled resource, a decision) — do NOT spin, and do NOT fabricate progress just to look busy. Instead:
-1. Write the handover, stating exactly what is needed and why nothing else can move without it.
-2. Pause the relay and ping Lloyd:
-   curl -s -X POST '${relay}/solve/await' ${auth} -d '{"solveId":"${solveId}","need":"<one line: what you need from Lloyd>"}'
-The relay then pauses (it will NOT auto-spawn a successor) until Lloyd provides it and resumes you. Use this ONLY for genuine external blockers, never as an escape hatch from hard work.
+# YOU NEVER STOP AND WAIT FOR LLOYD
+There is NO "pause until a human helps". If some external input only Lloyd could provide (a file, a login, a gated resource) would unlock a FASTER path, note it as an OPTIONAL hint and keep going regardless — do not stall, do not fabricate filler:
+   curl -s -X POST '${relay}/solve/wants' ${auth} -d '{"solveId":"${solveId}","gen":${gen},"need":"<one line: what would help; optional>"}'
+That call is NON-BLOCKING: it records the hint AND immediately hands off to a successor that keeps attacking other angles (new mechanisms, untried lanes, any external data you can fetch yourself). The relay never waits on Lloyd. It ends only on a real /solve/done, or when Lloyd presses Stop.
 
 # WHEN GENUINELY SOLVED (and verified)
 1. Write the solution + how you verified it to ${ho}.
@@ -194,9 +192,10 @@ export default {
       if (!authed()) return json({ error: 'unauthorized' }, 401);
       return queueStub(env).fetch('https://do/solvebeat', { method: 'POST', body: await req.text() });
     }
-    if (p === '/solve/await' && method === 'POST') {         // an agent: blocked, needs external human input
+    if ((p === '/solve/wants' || p === '/solve/await') && method === 'POST') { // an agent: external input would help (non-blocking, keeps going)
       if (!authed()) return json({ error: 'unauthorized' }, 401);
-      return queueStub(env).fetch('https://do/solveawait', { method: 'POST', body: await req.text() });
+      const b = await req.json().catch(() => ({})); b.relay = url.origin;
+      return queueStub(env).fetch('https://do/solvewants', { method: 'POST', body: JSON.stringify(b) });
     }
     if (p === '/solve/stop' && method === 'POST') {          // phone: hard-stop a relay
       if (!authed()) return json({ error: 'unauthorized' }, 401);
@@ -445,9 +444,10 @@ export class QueueDO {
       const sv = solves.find((x) => x.id === b.solveId);
       if (!sv) return json({ error: 'no such solve' }, 404);
       if (sv.status === 'solved') return json({ ok: true, alreadySolved: true });
-      // 'stopped' / 'awaiting' relays are sticky: only an explicit user Resume (force:true) revives them,
-      // so a still-running generation can't un-park a relay you deliberately halted.
-      if ((sv.status === 'stopped' || sv.status === 'awaiting') && !b.force) return json({ ok: true, parked: sv.status });
+      // a Stopped relay is sticky: only an explicit user Resume (force:true) revives it.
+      if (sv.status === 'stopped' && !b.force) return json({ ok: true, parked: 'stopped' });
+      // generation guard: ignore a hand-off from a superseded generation, so the relay can't fork.
+      if (typeof b.gen === 'number' && b.gen !== sv.generation) return json({ ok: true, superseded: true });
       const now = Date.now();
       sv.generation = (sv.generation || 1) + 1; sv.status = 'solving'; sv.lastActivity = now;
       sv.lastBeat = now; sv.beatSinceSpawn = false; sv.deadSpawns = 0; delete sv.awaiting;
@@ -475,18 +475,24 @@ export class QueueDO {
       }
       return json({ ok: true });
     }
-    if (op === 'solveawait') {                               // an agent is blocked on external human input
+    if (op === 'solvewants') {                               // an agent: an external input WOULD help -> flag it (non-blocking) and keep going
       const b = await request.json().catch(() => ({}));
       const solves = (await this.storage.get('solves')) || [];
       const sv = solves.find((x) => x.id === b.solveId);
-      if (sv && sv.status !== 'solved') {
-        const now = Date.now();
-        sv.status = 'awaiting';
-        sv.awaiting = { need: String(b.need || 'external input').slice(0, 200), since: now };
-        sv.lastActivity = now;
-        await this.storage.put('solves', solves);
-      }
-      return json({ ok: true });
+      if (!sv) return json({ error: 'no such solve' }, 404);
+      if (sv.status === 'solved') return json({ ok: true, alreadySolved: true });
+      if (sv.status === 'stopped' && !b.force) return json({ ok: true, parked: 'stopped' });
+      if (typeof b.gen === 'number' && b.gen !== sv.generation) return json({ ok: true, superseded: true });
+      const now = Date.now();
+      if (b.need) sv.wants = { need: String(b.need).slice(0, 200), since: now }; // a non-blocking hint shown on the dashboard
+      // keep going: hand off to a successor exactly like solvenext (the relay NEVER pauses for a human)
+      sv.generation = (sv.generation || 1) + 1; sv.status = 'solving'; sv.lastActivity = now;
+      sv.lastBeat = now; sv.beatSinceSpawn = false; sv.deadSpawns = 0; delete sv.awaiting;
+      await this.storage.put('solves', solves);
+      const spawns = (await this.storage.get('spawns')) || [];
+      spawns.push({ name: sv.id + '-g' + sv.generation, prompt: buildSolvePrompt(sv.goal, sv.generation, sv.id, b.relay || '', this.env.BUTTON_TOKEN, false), cwd: sv.cwd, ts: now });
+      await this.storage.put('spawns', spawns.slice(-20));
+      return json({ ok: true, generation: sv.generation });
     }
     if (op === 'solvestop') {                                // phone: hard-stop a relay
       const b = await request.json().catch(() => ({}));
@@ -512,12 +518,8 @@ export class QueueDO {
         if (sv.status !== 'solving') continue;               // skip awaiting / stopped / solved
         if (typeof sv.lastBeat !== 'number') continue;       // legacy relays opted out of the watchdog
         if (now - sv.lastBeat <= STALL_MS) continue;         // still checking in
-        if (sv.beatSinceSpawn === false && (sv.deadSpawns || 0) >= 2) {
-          // three generations in a row spawned but never beat -> environment is broken, stop spinning
-          sv.status = 'awaiting';
-          sv.awaiting = { need: 'The last 3 generations failed to start or never checked in — the spawn path or environment may be broken. Check the poller, then Continue.', since: now };
-          sv.lastActivity = now; paused.push(sv.id); changed = true; continue;
-        }
+        // never pause: even a run of generations that fail to check in just keeps getting retried
+        // (deadSpawns is only tracked so the poller can log a warning if the spawn path looks broken).
         if (sv.beatSinceSpawn === false) sv.deadSpawns = (sv.deadSpawns || 0) + 1;
         sv.generation = (sv.generation || 1) + 1;
         sv.lastActivity = now; sv.lastBeat = now; sv.beatSinceSpawn = false;
