@@ -82,7 +82,7 @@
     </div>
   </details>
 
-  <label class="endless" for="endless"><input id="endless" type="checkbox" /><span><b>Endless mode</b><br><small>keep working autonomously until it's solved</small></span></label>
+  <label class="endless" for="solve"><input id="solve" type="checkbox" /><span><b>Solve mode</b><br><small>never gives up — spawns a fresh successor if it gets stuck, until solved</small></span></label>
 
   <div class="spacer"></div>
 
@@ -102,14 +102,14 @@ async function start(){
   const task = $('task').value.trim();
   if (!task){ setStatus('Type a task first','err'); $('task').focus(); return; }
   const cwd = $('cwd').value.trim();
-  const endless = $('endless').checked;
-  $('go').disabled = true; haptic(20); setStatus('Opening a terminal on your PC…','go');
+  const solve = $('solve').checked;
+  $('go').disabled = true; haptic(20); setStatus(solve?'Starting Solve relay on your PC…':'Opening a terminal on your PC…','go');
   try{
-    const r = await api('/spawn', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ task, cwd, endless }) });
+    const r = await api(solve ? '/solve/new' : '/spawn', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(solve ? { goal: task, cwd } : { task, cwd }) });
     if (!r.ok) throw new Error('relay '+r.status);
     haptic([15,40,15]);
-    setStatus('Terminal opening · it will appear in Agents with its chat link','ok');
-    setTimeout(()=>{ location.href = START + '/agents'; }, 1400);
+    setStatus(solve?'Solve relay started · it keeps going until solved':'Terminal opening · appears in Agents with its chat link','ok');
+    setTimeout(()=>{ location.href = START + '/agents'; }, 1500);
   } catch(e){ setStatus('Could not reach relay ('+e.message+')','err'); $('go').disabled = false; }
 }
 $('go').addEventListener('click', start);

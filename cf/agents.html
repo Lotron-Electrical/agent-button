@@ -75,6 +75,7 @@
   </header>
   <div class="stats" id="stats" style="display:none"></div>
   <div class="sub" id="sub">loading…</div>
+  <div id="solveswrap"></div>
   <div id="list"></div>
   <div class="seclabel" id="extlabel" style="display:none">Other live agents on this PC</div>
   <div id="ext"></div>
@@ -116,6 +117,13 @@ function renderExternal(external){
     return '<div class="extcard"><div class="top"><span class="name">'+esc(a.name)+'</span><span class="badge '+st.cls+'">'+esc(st.label)+'</span></div>'+(meta?'<div class="meta">'+esc(meta)+'</div>':'')+action+'</div>';
   }).join('');
 }
+function renderSolves(solves){
+  if(!solves || !solves.length){ $('solveswrap').innerHTML=''; return; }
+  $('solveswrap').innerHTML = '<div class="seclabel" style="margin-top:4px;border-top:none;padding-top:0">Solve relays · never give up</div>' + solves.map(s=>{
+    const st = s.status==='solved' ? {label:'solved',cls:'idle'} : {label:'solving',cls:'busy'};
+    return '<div class="extcard"><div class="top"><span class="name">'+esc(s.title||s.id)+'</span><span class="badge '+st.cls+'">'+st.label+'</span></div><div class="meta">'+esc('∞ generation '+(s.generation||1)+(s.summary?' · '+s.summary:''))+'</div></div>';
+  }).join('');
+}
 function render(agents){
   if(!agents.length){ $('list').innerHTML = '<div class="empty">No agents yet.<br>Start one and chat with it right here.<br><a href="'+START+'">New agent →</a></div>'; return; }
   $('list').innerHTML = agents.map(a => {
@@ -151,6 +159,7 @@ async function refresh(){
   renderStats(data.stats);
   $('sub').innerHTML = agents.length+' agent'+(agents.length===1?'':'s')+(working?' · '+working+' working':'');
   render(agents);
+  renderSolves(data.solves || []);
   renderExternal(data.external || []);
 }
 refresh();

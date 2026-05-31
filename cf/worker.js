@@ -22,6 +22,38 @@ const CONTINUE_MSG = 'Continue working on the task now. Pick up exactly where yo
 const wrapEndless = (t) => String(t || '') + ENDLESS_PROTOCOL;
 const isSolved = (r) => /\[\[\s*SOLVED\s*\]\]/i.test(String(r || ''));
 
+// ---- Solve mode: a relay of agents that never gives up ----
+const SOLVE_HANDOVER_BASE = '/c/Users/Lloyd Gibbs/.agent-button-spawns/solve/';
+function buildSolvePrompt(goal, gen, solveId, relay, secret, firstGen) {
+  const ho = SOLVE_HANDOVER_BASE + solveId + '/handover.md';
+  return `You are a SOLVE-MODE agent, GENERATION ${gen} of a relay that does NOT stop until the problem is solved. If you cannot finish, you hand the problem to a fresh successor that continues exactly where you left off. No problem is ever abandoned.
+
+# THE PROBLEM
+${goal}
+
+# SHARED HANDOVER FILE (persists across every generation)
+${ho}
+${firstGen ? 'You are generation 1. Run: mkdir -p "$(dirname ' + JSON.stringify(ho) + ')" and create the handover file as you work.' : 'READ THIS FILE FIRST. The previous generation stopped here. Continue from exactly where they left off; do not redo their dead-ends.'}
+
+# HOW TO WORK
+- Work relentlessly and concretely (read, edit, run, verify). Make real, verifiable progress this session.
+- Continuously keep ${ho} updated: what you tried, what is ruled out, what you learned, the single most promising next step, and the exact state/files to resume from.
+
+# IF YOU GET STUCK (never just give up)
+When you hit a wall, run low on context, or judge the problem too large to finish in this one session:
+1. Write a thorough, honest handover to ${ho}.
+2. Spawn your successor (it will read the handover and continue):
+   curl -s -X POST '${relay}/solve/next' -H 'Authorization: Bearer ${secret}' -H 'Content-Type: application/json' -d '{"solveId":"${solveId}"}'
+3. Then stop. The successor takes over.
+
+# WHEN GENUINELY SOLVED (and verified)
+1. Write the solution + how you verified it to ${ho}.
+2. Mark it done:
+   curl -s -X POST '${relay}/solve/done' -H 'Authorization: Bearer ${secret}' -H 'Content-Type: application/json' -d '{"solveId":"${solveId}","summary":"<one-line result>"}'
+
+Hand off rather than quit. The relay continues, generation after generation, until the problem is solved.`;
+}
+
 export default {
   async fetch(req, env) {
     const SECRET = env.BUTTON_TOKEN || '';
@@ -131,6 +163,20 @@ export default {
       if (!authed()) return json({ error: 'unauthorized' }, 401);
       return queueStub(env).fetch('https://do/spawnnext', { method: 'POST' });
     }
+    if (p === '/solve/new' && method === 'POST') {           // phone: start a Solve relay (never gives up)
+      if (!authed()) return json({ error: 'unauthorized' }, 401);
+      const b = await req.json().catch(() => ({})); b.relay = url.origin;
+      return queueStub(env).fetch('https://do/solvenew', { method: 'POST', body: JSON.stringify(b) });
+    }
+    if (p === '/solve/next' && method === 'POST') {          // an agent: hand off to the next generation
+      if (!authed()) return json({ error: 'unauthorized' }, 401);
+      const b = await req.json().catch(() => ({})); b.relay = url.origin;
+      return queueStub(env).fetch('https://do/solvenext', { method: 'POST', body: JSON.stringify(b) });
+    }
+    if (p === '/solve/done' && method === 'POST') {          // an agent: the problem is solved
+      if (!authed()) return json({ error: 'unauthorized' }, 401);
+      return queueStub(env).fetch('https://do/solvedone', { method: 'POST', body: await req.text() });
+    }
     if (p === '/chat/get') {                                 // phone: fetch a conversation
       if (!authed()) return json({ error: 'unauthorized' }, 401);
       return queueStub(env).fetch('https://do/chatget?id=' + encodeURIComponent(url.searchParams.get('id') || ''), { method: 'POST' });
@@ -162,8 +208,9 @@ export default {
 
 // Strongly-consistent queue. One instance ('main') serializes all ops.
 export class QueueDO {
-  constructor(state) {
+  constructor(state, env) {
     this.storage = state.storage;
+    this.env = env;
   }
   async fetch(request) {
     const op = new URL(request.url).pathname.slice(1); // 'enqueue' | 'next' | 'ack' | 'status/<id>'
@@ -247,6 +294,7 @@ export class QueueDO {
         agents: (await this.storage.get('chatagents')) || [],
         external: (await this.storage.get('external')) || [],
         externalTs: (await this.storage.get('externalTs')) || 0,
+        solves: (await this.storage.get('solves')) || [],
         stats: (await this.storage.get('stats')) || null,
         ts: Date.now()
       });
@@ -339,6 +387,44 @@ export class QueueDO {
       const s = spawns.shift();
       await this.storage.put('spawns', spawns);
       return json(s);
+    }
+
+    // ---- Solve mode (relay of never-give-up agents) ----
+    if (op === 'solvenew') {
+      const b = await request.json(); // {goal, cwd, relay}
+      const goal = String(b.goal || '').trim();
+      if (!goal) return json({ error: 'goal required' }, 400);
+      const solveId = 'sv' + crypto.randomUUID().replace(/-/g, '').slice(0, 6);
+      const now = Date.now();
+      const cwd = String(b.cwd || '');
+      const solves = (await this.storage.get('solves')) || [];
+      solves.unshift({ id: solveId, title: goal.split('\n')[0].slice(0, 70), goal: goal.slice(0, 600), cwd, status: 'solving', generation: 1, createdAt: now, lastActivity: now });
+      await this.storage.put('solves', solves.slice(0, 30));
+      const spawns = (await this.storage.get('spawns')) || [];
+      spawns.push({ name: solveId + '-g1', prompt: buildSolvePrompt(goal, 1, solveId, b.relay || '', this.env.BUTTON_TOKEN, true), cwd, ts: now });
+      await this.storage.put('spawns', spawns.slice(-20));
+      return json({ ok: true, id: solveId });
+    }
+    if (op === 'solvenext') {
+      const b = await request.json(); // {solveId, relay}
+      const solves = (await this.storage.get('solves')) || [];
+      const sv = solves.find((x) => x.id === b.solveId);
+      if (!sv) return json({ error: 'no such solve' }, 404);
+      if (sv.status === 'solved') return json({ ok: true, alreadySolved: true });
+      const now = Date.now();
+      sv.generation = (sv.generation || 1) + 1; sv.status = 'solving'; sv.lastActivity = now;
+      await this.storage.put('solves', solves);
+      const spawns = (await this.storage.get('spawns')) || [];
+      spawns.push({ name: sv.id + '-g' + sv.generation, prompt: buildSolvePrompt(sv.goal, sv.generation, sv.id, b.relay || '', this.env.BUTTON_TOKEN, false), cwd: sv.cwd, ts: now });
+      await this.storage.put('spawns', spawns.slice(-20));
+      return json({ ok: true, generation: sv.generation });
+    }
+    if (op === 'solvedone') {
+      const b = await request.json(); // {solveId, summary}
+      const solves = (await this.storage.get('solves')) || [];
+      const sv = solves.find((x) => x.id === b.solveId);
+      if (sv) { sv.status = 'solved'; sv.summary = String(b.summary || '').slice(0, 300); sv.lastActivity = Date.now(); await this.storage.put('solves', solves); }
+      return json({ ok: true });
     }
 
     return new Response('do: not found', { status: 404 });
