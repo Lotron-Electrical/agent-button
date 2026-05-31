@@ -445,6 +445,9 @@ export class QueueDO {
       const sv = solves.find((x) => x.id === b.solveId);
       if (!sv) return json({ error: 'no such solve' }, 404);
       if (sv.status === 'solved') return json({ ok: true, alreadySolved: true });
+      // 'stopped' / 'awaiting' relays are sticky: only an explicit user Resume (force:true) revives them,
+      // so a still-running generation can't un-park a relay you deliberately halted.
+      if ((sv.status === 'stopped' || sv.status === 'awaiting') && !b.force) return json({ ok: true, parked: sv.status });
       const now = Date.now();
       sv.generation = (sv.generation || 1) + 1; sv.status = 'solving'; sv.lastActivity = now;
       sv.lastBeat = now; sv.beatSinceSpawn = false; sv.deadSpawns = 0; delete sv.awaiting;
