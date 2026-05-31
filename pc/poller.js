@@ -342,6 +342,26 @@ async function reportExternal() {
   } catch (_) {} finally { externalBusy = false; }
 }
 
+// ---------- Solve-mode watchdog ----------
+// Ask the relay to keep never-give-up relays alive: any 'solving' relay that has gone
+// silent for 30 min gets its successor auto-spawned from the handover (the respawn lands
+// in the normal spawn queue, so pollSpawn opens it via the ClaudeCodeAdmin task). A relay
+// that escalates to 'awaiting' or is Stopped is left alone. Throttled to once a minute.
+let watchBusy = false, lastWatch = 0;
+async function pollSolveWatch() {
+  const now = Date.now();
+  if (watchBusy || now - lastWatch < 60000) return;
+  watchBusy = true; lastWatch = now;
+  try {
+    const r = await fetch(RELAY + '/solve/watch', { method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' } });
+    if (r.ok) {
+      const j = await r.json();
+      if (j.respawned && j.respawned.length) log('solve watchdog: respawned ' + j.respawned.join(', '));
+      if (j.paused && j.paused.length) log('solve watchdog: paused (needs human) ' + j.paused.join(', '));
+    }
+  } catch (_) {} finally { watchBusy = false; }
+}
+
 async function handle(t) {
   const id = t.id;
   const count = Math.max(1, Math.min(4, t.count || 1));
@@ -391,6 +411,7 @@ async function loop() {
     pollSpawn(); // fire-and-forget; opens any queued real terminal agents
     reportStats(); // fire-and-forget; reports RAM/CPU to the dashboard
     reportExternal(); // fire-and-forget; reports live Claude terminal tabs
+    pollSolveWatch(); // fire-and-forget; keeps Solve relays alive (throttled to 1/min)
     await sleep(POLL_MS);
   }
 }

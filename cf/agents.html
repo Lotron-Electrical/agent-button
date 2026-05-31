@@ -62,6 +62,9 @@
   .seclabel{font-size:11px; color:var(--dim); letter-spacing:.6px; text-transform:uppercase; margin:20px 4px 10px; border-top:1px solid var(--line); padding-top:14px}
   .extcard{background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:14px; margin-bottom:12px}
   .extlink{display:block; text-align:center; padding:11px; border-radius:11px; font-size:14px; font-weight:600; color:var(--accent2); border:1px solid var(--line); background:var(--panel2); text-decoration:none}
+  .srelay{display:block; width:100%; margin-top:10px; padding:11px; border-radius:11px; font:inherit; font-size:14px; font-weight:600; cursor:pointer; border:1px solid var(--line); background:var(--panel2); text-align:center}
+  .srelay.stop{color:var(--err)} .srelay.cont{color:var(--accent2)}
+  .srelay:active{filter:brightness(1.15)} .srelay[disabled]{opacity:.5}
   .extlink:active{border-color:var(--accent)}
   .extnochat{text-align:center; padding:8px; font-size:12px; color:var(--dim)}
   .foot{text-align:center; color:var(--dim); font-size:11px; margin-top:18px; opacity:.7}
@@ -120,8 +123,13 @@ function renderExternal(external){
 function renderSolves(solves){
   if(!solves || !solves.length){ $('solveswrap').innerHTML=''; return; }
   $('solveswrap').innerHTML = '<div class="seclabel" style="margin-top:4px;border-top:none;padding-top:0">Solve relays · never give up</div>' + solves.map(s=>{
-    const st = s.status==='solved' ? {label:'solved',cls:'idle'} : {label:'solving',cls:'busy'};
-    return '<div class="extcard"><div class="top"><span class="name">'+esc(s.title||s.id)+'</span><span class="badge '+st.cls+'">'+st.label+'</span></div><div class="meta">'+esc('∞ generation '+(s.generation||1)+(s.summary?' · '+s.summary:''))+'</div></div>';
+    const gen = '∞ generation '+(s.generation||1);
+    let st, line, actions='';
+    if(s.status==='solved'){ st={label:'solved',cls:'idle'}; line=gen+(s.summary?' · '+s.summary:''); }
+    else if(s.status==='awaiting'){ st={label:'needs you',cls:'err'}; line=gen+' · ⏸ '+((s.awaiting&&s.awaiting.need)||'waiting on you'); actions='<button class="srelay cont" data-id="'+esc(s.id)+'">Provide it · continue ›</button>'; }
+    else if(s.status==='stopped'){ st={label:'stopped',cls:'other'}; line=gen+' · stopped'; actions='<button class="srelay cont" data-id="'+esc(s.id)+'">Resume ›</button>'; }
+    else { st={label:'solving',cls:'busy'}; line=gen+(s.autoContinues?' · '+s.autoContinues+' auto-continued':'')+(s.lastBeat?' · beat '+ago(s.lastBeat)+' ago':''); actions='<button class="srelay stop" data-id="'+esc(s.id)+'">Stop relay</button>'; }
+    return '<div class="extcard"><div class="top"><span class="name">'+esc(s.title||s.id)+'</span><span class="badge '+st.cls+'">'+esc(st.label)+'</span><button class="close sdel" data-id="'+esc(s.id)+'" aria-label="remove relay">✕</button></div><div class="meta">'+esc(line)+'</div>'+actions+'</div>';
   }).join('');
 }
 function render(agents){
@@ -147,6 +155,25 @@ $('list').addEventListener('click', async (e) => {
   if (!confirm('Close this agent? Its chat will be removed.')) return;
   btn.textContent = '·'; btn.disabled = true;
   try { await api('/chat/close', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ id }) }); } catch(e){}
+  refresh();
+});
+
+$('solveswrap').addEventListener('click', async (e) => {
+  const del = e.target.closest('.sdel');
+  if (del) {
+    const id = del.dataset.id;
+    if (!confirm('Remove this relay from the list?')) return;
+    del.disabled = true; del.textContent = '·';
+    try { await api('/solve/delete', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ solveId: id }) }); } catch(e){}
+    return refresh();
+  }
+  const btn = e.target.closest('.srelay');
+  if (!btn) return;
+  const id = btn.dataset.id;
+  const stop = btn.classList.contains('stop');
+  if (stop && !confirm('Stop this relay? It will not spawn another generation. Close its terminal window separately if one is open.')) return;
+  btn.disabled = true; btn.textContent = stop ? 'stopping…' : 'continuing…';
+  try { await api(stop ? '/solve/stop' : '/solve/next', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ solveId: id }) }); } catch(e){}
   refresh();
 });
 

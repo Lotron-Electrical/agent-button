@@ -26,6 +26,7 @@ const isSolved = (r) => /\[\[\s*SOLVED\s*\]\]/i.test(String(r || ''));
 const SOLVE_HANDOVER_BASE = '/c/Users/Lloyd Gibbs/.agent-button-spawns/solve/';
 function buildSolvePrompt(goal, gen, solveId, relay, secret, firstGen) {
   const ho = SOLVE_HANDOVER_BASE + solveId + '/handover.md';
+  const auth = "-H 'Authorization: Bearer " + secret + "' -H 'Content-Type: application/json'";
   return `You are a SOLVE-MODE agent, GENERATION ${gen} of a relay that does NOT stop until the problem is solved. If you cannot finish, you hand the problem to a fresh successor that continues exactly where you left off. No problem is ever abandoned.
 
 # THE PROBLEM
@@ -39,19 +40,31 @@ ${firstGen ? 'You are generation 1. Run: mkdir -p "$(dirname ' + JSON.stringify(
 - Work relentlessly and concretely (read, edit, run, verify). Make real, verifiable progress this session.
 - Continuously keep ${ho} updated: what you tried, what is ruled out, what you learned, the single most promising next step, and the exact state/files to resume from.
 
-# IF YOU GET STUCK (never just give up)
-When you hit a wall, run low on context, or judge the problem too large to finish in this one session:
+# HEARTBEAT (so the watchdog knows you are alive)
+At the START of every turn, and again right before you launch any long-running command, send:
+   curl -s -X POST '${relay}/solve/beat' ${auth} -d '{"solveId":"${solveId}"}'
+A watchdog automatically spawns your successor if you go silent for 30 minutes. Beat often. If a command will run longer than that, start it in the background and keep beating while it runs.
+
+# IF YOU GET STUCK BUT THE WORK CAN CONTINUE (never just give up)
+When you hit a wall, run low on context, or judge the problem too large to finish this session:
 1. Write a thorough, honest handover to ${ho}.
-2. Spawn your successor (it will read the handover and continue):
-   curl -s -X POST '${relay}/solve/next' -H 'Authorization: Bearer ${secret}' -H 'Content-Type: application/json' -d '{"solveId":"${solveId}"}'
+2. Hand off to your successor (it reads the handover and continues):
+   curl -s -X POST '${relay}/solve/next' ${auth} -d '{"solveId":"${solveId}"}'
 3. Then stop. The successor takes over.
+
+# IF YOU ARE BLOCKED ON SOMETHING ONLY A HUMAN CAN PROVIDE
+If real progress is impossible without an external input only Lloyd can give (a file, a login or credential, a gated/paywalled resource, a decision) — do NOT spin, and do NOT fabricate progress just to look busy. Instead:
+1. Write the handover, stating exactly what is needed and why nothing else can move without it.
+2. Pause the relay and ping Lloyd:
+   curl -s -X POST '${relay}/solve/await' ${auth} -d '{"solveId":"${solveId}","need":"<one line: what you need from Lloyd>"}'
+The relay then pauses (it will NOT auto-spawn a successor) until Lloyd provides it and resumes you. Use this ONLY for genuine external blockers, never as an escape hatch from hard work.
 
 # WHEN GENUINELY SOLVED (and verified)
 1. Write the solution + how you verified it to ${ho}.
 2. Mark it done:
-   curl -s -X POST '${relay}/solve/done' -H 'Authorization: Bearer ${secret}' -H 'Content-Type: application/json' -d '{"solveId":"${solveId}","summary":"<one-line result>"}'
+   curl -s -X POST '${relay}/solve/done' ${auth} -d '{"solveId":"${solveId}","summary":"<one-line result>"}'
 
-Hand off rather than quit. The relay continues, generation after generation, until the problem is solved.`;
+Hand off rather than quit. The relay continues, generation after generation, until the problem is solved — or until it honestly needs Lloyd.`;
 }
 
 export default {
@@ -176,6 +189,27 @@ export default {
     if (p === '/solve/done' && method === 'POST') {          // an agent: the problem is solved
       if (!authed()) return json({ error: 'unauthorized' }, 401);
       return queueStub(env).fetch('https://do/solvedone', { method: 'POST', body: await req.text() });
+    }
+    if (p === '/solve/beat' && method === 'POST') {          // an agent: heartbeat (alive + working)
+      if (!authed()) return json({ error: 'unauthorized' }, 401);
+      return queueStub(env).fetch('https://do/solvebeat', { method: 'POST', body: await req.text() });
+    }
+    if (p === '/solve/await' && method === 'POST') {         // an agent: blocked, needs external human input
+      if (!authed()) return json({ error: 'unauthorized' }, 401);
+      return queueStub(env).fetch('https://do/solveawait', { method: 'POST', body: await req.text() });
+    }
+    if (p === '/solve/stop' && method === 'POST') {          // phone: hard-stop a relay
+      if (!authed()) return json({ error: 'unauthorized' }, 401);
+      return queueStub(env).fetch('https://do/solvestop', { method: 'POST', body: await req.text() });
+    }
+    if (p === '/solve/watch' && method === 'POST') {         // poller: respawn stalled relays / pause crash-loops
+      if (!authed()) return json({ error: 'unauthorized' }, 401);
+      const b = await req.json().catch(() => ({})); b.relay = url.origin;
+      return queueStub(env).fetch('https://do/solvewatch', { method: 'POST', body: JSON.stringify(b) });
+    }
+    if (p === '/solve/delete' && method === 'POST') {        // phone: remove a relay from the list
+      if (!authed()) return json({ error: 'unauthorized' }, 401);
+      return queueStub(env).fetch('https://do/solvedelete', { method: 'POST', body: await req.text() });
     }
     if (p === '/chat/get') {                                 // phone: fetch a conversation
       if (!authed()) return json({ error: 'unauthorized' }, 401);
@@ -398,7 +432,7 @@ export class QueueDO {
       const now = Date.now();
       const cwd = String(b.cwd || '');
       const solves = (await this.storage.get('solves')) || [];
-      solves.unshift({ id: solveId, title: goal.split('\n')[0].slice(0, 70), goal: goal.slice(0, 600), cwd, status: 'solving', generation: 1, createdAt: now, lastActivity: now });
+      solves.unshift({ id: solveId, title: goal.split('\n')[0].slice(0, 70), goal: goal.slice(0, 600), cwd, status: 'solving', generation: 1, createdAt: now, lastActivity: now, lastBeat: now, beatSinceSpawn: false, deadSpawns: 0, autoContinues: 0 });
       await this.storage.put('solves', solves.slice(0, 30));
       const spawns = (await this.storage.get('spawns')) || [];
       spawns.push({ name: solveId + '-g1', prompt: buildSolvePrompt(goal, 1, solveId, b.relay || '', this.env.BUTTON_TOKEN, true), cwd, ts: now });
@@ -413,6 +447,7 @@ export class QueueDO {
       if (sv.status === 'solved') return json({ ok: true, alreadySolved: true });
       const now = Date.now();
       sv.generation = (sv.generation || 1) + 1; sv.status = 'solving'; sv.lastActivity = now;
+      sv.lastBeat = now; sv.beatSinceSpawn = false; sv.deadSpawns = 0; delete sv.awaiting;
       await this.storage.put('solves', solves);
       const spawns = (await this.storage.get('spawns')) || [];
       spawns.push({ name: sv.id + '-g' + sv.generation, prompt: buildSolvePrompt(sv.goal, sv.generation, sv.id, b.relay || '', this.env.BUTTON_TOKEN, false), cwd: sv.cwd, ts: now });
@@ -423,7 +458,80 @@ export class QueueDO {
       const b = await request.json(); // {solveId, summary}
       const solves = (await this.storage.get('solves')) || [];
       const sv = solves.find((x) => x.id === b.solveId);
-      if (sv) { sv.status = 'solved'; sv.summary = String(b.summary || '').slice(0, 300); sv.lastActivity = Date.now(); await this.storage.put('solves', solves); }
+      if (sv) { sv.status = 'solved'; sv.summary = String(b.summary || '').slice(0, 300); sv.lastActivity = Date.now(); delete sv.awaiting; await this.storage.put('solves', solves); }
+      return json({ ok: true });
+    }
+    if (op === 'solvebeat') {                                // an agent says: alive + working
+      const b = await request.json().catch(() => ({}));
+      const solves = (await this.storage.get('solves')) || [];
+      const sv = solves.find((x) => x.id === b.solveId);
+      if (sv && sv.status === 'solving') {
+        const now = Date.now();
+        sv.lastBeat = now; sv.beatSinceSpawn = true; sv.deadSpawns = 0; sv.lastActivity = now;
+        await this.storage.put('solves', solves);
+      }
+      return json({ ok: true });
+    }
+    if (op === 'solveawait') {                               // an agent is blocked on external human input
+      const b = await request.json().catch(() => ({}));
+      const solves = (await this.storage.get('solves')) || [];
+      const sv = solves.find((x) => x.id === b.solveId);
+      if (sv && sv.status !== 'solved') {
+        const now = Date.now();
+        sv.status = 'awaiting';
+        sv.awaiting = { need: String(b.need || 'external input').slice(0, 200), since: now };
+        sv.lastActivity = now;
+        await this.storage.put('solves', solves);
+      }
+      return json({ ok: true });
+    }
+    if (op === 'solvestop') {                                // phone: hard-stop a relay
+      const b = await request.json().catch(() => ({}));
+      const solves = (await this.storage.get('solves')) || [];
+      const sv = solves.find((x) => x.id === b.solveId);
+      if (sv) { sv.status = 'stopped'; delete sv.awaiting; sv.lastActivity = Date.now(); await this.storage.put('solves', solves); }
+      // drop any queued (not-yet-opened) generation for this relay
+      const spawns = (await this.storage.get('spawns')) || [];
+      const kept = spawns.filter((s) => !(s.name && s.name.startsWith((b.solveId || '\0') + '-g')));
+      if (kept.length !== spawns.length) await this.storage.put('spawns', kept);
+      return json({ ok: true });
+    }
+    if (op === 'solvewatch') {                               // poller: keep relays alive (auto-continue / pause crash-loops)
+      const b = await request.json().catch(() => ({}));
+      const relay = b.relay || '';
+      const solves = (await this.storage.get('solves')) || [];
+      const now = Date.now();
+      const STALL_MS = (typeof b.stallMs === 'number' && b.stallMs >= 0) ? b.stallMs : 30 * 60 * 1000;
+      const spawns = (await this.storage.get('spawns')) || [];
+      const respawned = [], paused = [];
+      let changed = false;
+      for (const sv of solves) {
+        if (sv.status !== 'solving') continue;               // skip awaiting / stopped / solved
+        if (typeof sv.lastBeat !== 'number') continue;       // legacy relays opted out of the watchdog
+        if (now - sv.lastBeat <= STALL_MS) continue;         // still checking in
+        if (sv.beatSinceSpawn === false && (sv.deadSpawns || 0) >= 2) {
+          // three generations in a row spawned but never beat -> environment is broken, stop spinning
+          sv.status = 'awaiting';
+          sv.awaiting = { need: 'The last 3 generations failed to start or never checked in — the spawn path or environment may be broken. Check the poller, then Continue.', since: now };
+          sv.lastActivity = now; paused.push(sv.id); changed = true; continue;
+        }
+        if (sv.beatSinceSpawn === false) sv.deadSpawns = (sv.deadSpawns || 0) + 1;
+        sv.generation = (sv.generation || 1) + 1;
+        sv.lastActivity = now; sv.lastBeat = now; sv.beatSinceSpawn = false;
+        sv.autoContinues = (sv.autoContinues || 0) + 1;
+        spawns.push({ name: sv.id + '-g' + sv.generation, prompt: buildSolvePrompt(sv.goal, sv.generation, sv.id, relay, this.env.BUTTON_TOKEN, false), cwd: sv.cwd, ts: now });
+        respawned.push(sv.id + '-g' + sv.generation); changed = true;
+      }
+      if (changed) { await this.storage.put('solves', solves); await this.storage.put('spawns', spawns.slice(-20)); }
+      return json({ respawned, paused });
+    }
+    if (op === 'solvedelete') {                              // phone: remove a relay from the list
+      const b = await request.json().catch(() => ({}));
+      const solves = (await this.storage.get('solves')) || [];
+      await this.storage.put('solves', solves.filter((x) => x.id !== b.solveId));
+      const spawns = (await this.storage.get('spawns')) || [];
+      const kept = spawns.filter((s) => !(s.name && s.name.startsWith((b.solveId || '\0') + '-g')));
+      if (kept.length !== spawns.length) await this.storage.put('spawns', kept);
       return json({ ok: true });
     }
 
