@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1" />
+<meta name="theme-color" content="#0d0d0d" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<title>Agents</title>
+<style>
+  :root{
+    --bg:#0d0d0d; --panel:#161616; --panel2:#1d1d1d; --line:#2a2a2a;
+    --ink:#ece7e1; --dim:#8a847c; --accent:#C15F3C; --accent2:#e0794f; --ok:#5fb87a; --warn:#d9a84f; --err:#d9655a;
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent}
+  html,body{margin:0; height:100%}
+  body{
+    background:radial-gradient(120% 80% at 50% -10%, #1a1411 0%, var(--bg) 55%);
+    color:var(--ink); font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+    min-height:100%; padding:max(18px,env(safe-area-inset-top)) 16px calc(18px + env(safe-area-inset-bottom));
+  }
+  header{display:flex; align-items:center; gap:10px; margin-bottom:6px}
+  .dot{width:10px; height:10px; border-radius:50%; background:var(--accent); box-shadow:0 0 12px var(--accent)}
+  h1{font-size:17px; margin:0; letter-spacing:.5px; font-weight:600; flex:1}
+  h1 span{color:var(--dim); font-weight:400}
+  .spawnlink{font-size:13px; color:var(--accent2); text-decoration:none; border:1px solid var(--line); padding:7px 11px; border-radius:10px}
+  .spawnlink:active{background:var(--panel)}
+  .sub{font-size:12px; color:var(--dim); margin:8px 2px 16px; letter-spacing:.3px; display:flex; align-items:center; gap:7px}
+  .sub.stale{color:var(--warn)} .sub.offline{color:var(--err)} .sub.ok{color:var(--dim)}
+  .sub .live{width:7px;height:7px;border-radius:50%;background:var(--ok);box-shadow:0 0 8px var(--ok)}
+  .card{
+    background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:14px; margin-bottom:12px;
+  }
+  .top{display:flex; align-items:center; gap:10px; margin-bottom:8px}
+  .name{font-size:16px; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1}
+  .badge{font-size:11px; padding:3px 9px; border-radius:20px; letter-spacing:.4px; text-transform:uppercase; font-weight:600; white-space:nowrap}
+  .badge.busy{color:#1a0f0a; background:var(--accent); animation:pulse 1.6s ease-in-out infinite}
+  .badge.idle{color:var(--ok); background:rgba(95,184,122,.14); border:1px solid rgba(95,184,122,.35)}
+  .badge.other{color:var(--dim); background:var(--panel2); border:1px solid var(--line)}
+  @keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(193,95,60,.5)}50%{box-shadow:0 0 0 6px rgba(193,95,60,0)}}
+  .meta{font-size:12px; color:var(--dim); margin-bottom:12px; line-height:1.5; word-break:break-all}
+  a.chat{
+    display:block; text-align:center; text-decoration:none; padding:13px; border-radius:11px; font-size:15px; font-weight:600;
+    color:#1a0f0a; background:linear-gradient(135deg,var(--accent2),var(--accent)); box-shadow:0 6px 18px rgba(193,95,60,.3);
+  }
+  a.chat:active{transform:scale(.99); filter:brightness(1.08)}
+  .chat.off{display:block; text-align:center; padding:13px; border-radius:11px; font-size:14px; color:var(--dim); background:var(--panel2); border:1px dashed var(--line)}
+  .empty{text-align:center; color:var(--dim); font-size:14px; line-height:2; margin-top:60px}
+  .empty a{color:var(--accent2)}
+  .foot{text-align:center; color:var(--dim); font-size:11px; margin-top:18px; opacity:.7}
+</style>
+</head>
+<body>
+  <header>
+    <div class="dot"></div>
+    <h1>AGENTS <span>// your PC</span></h1>
+    <a class="spawnlink" href="__START__">+ Spawn</a>
+  </header>
+  <div class="sub ok" id="sub">loading…</div>
+  <div id="list"></div>
+  <div class="foot">tap an agent to open its live chat · refreshes every 3s</div>
+
+<script>
+const SECRET = "__SECRET__";
+const START = "__START__";
+const $ = (id) => document.getElementById(id);
+
+function api(p){ return fetch(p, { headers: { Authorization: 'Bearer ' + SECRET } }); }
+function ago(ts){ if(!ts) return ''; let s=Math.max(0,Math.round((Date.now()-ts)/1000)); if(s<60)return s+'s'; if(s<3600)return Math.round(s/60)+'m'; return Math.round(s/3600)+'h'; }
+function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function shortCwd(c){ if(!c) return ''; return c.replace(/^[A-Za-z]:\\Users\\[^\\]+/, '~').replace(/\\/g,'/'); }
+function statusInfo(s){ s=String(s||'').toLowerCase(); if(s==='busy')return{label:'working',cls:'busy'}; if(s==='idle')return{label:'idle',cls:'idle'}; return{label:s||'unknown',cls:'other'}; }
+function setHead(cls, html){ const h=$('sub'); h.className='sub '+cls; h.innerHTML=html; }
+
+function render(agents){
+  if(!agents.length){ $('list').innerHTML = '<div class="empty">No live agents reported yet.<br>Agents you spawn from the button show up here.<br><a href="'+START+'">Spawn one →</a></div>'; return; }
+  $('list').innerHTML = agents.map(a => {
+    const st = statusInfo(a.status);
+    const chat = a.chat
+      ? '<a class="chat" href="'+esc(a.chat)+'" target="_blank" rel="noopener">Open chat ↗</a>'
+      : '<span class="chat off">no chat link yet</span>';
+    const meta = [shortCwd(a.cwd), a.updatedAt ? 'active '+ago(a.updatedAt)+' ago' : ''].filter(Boolean).join(' · ');
+    return '<div class="card"><div class="top"><span class="name">'+esc(a.name)+'</span>'+
+           '<span class="badge '+st.cls+'">'+esc(st.label)+'</span></div>'+
+           (meta ? '<div class="meta">'+esc(meta)+'</div>' : '')+ chat +'</div>';
+  }).join('');
+}
+
+async function refresh(){
+  let data;
+  try { data = await (await api('/agents')).json(); }
+  catch(e){ setHead('offline', 'can’t reach relay'); return; }
+  const agents = data.agents || [];
+  const age = data.ts ? Math.round((Date.now()-data.ts)/1000) : 9999;
+  if (age > 20) setHead('stale', 'PC not reporting · poller offline or PC asleep'+(data.ts?' ('+ago(data.ts)+' ago)':''));
+  else setHead('ok', '<span class="live"></span>'+agents.length+' live agent'+(agents.length===1?'':'s')+' · updated '+ago(data.ts)+' ago');
+  render(agents);
+}
+refresh();
+setInterval(refresh, 3000);
+</script>
+</body>
+</html>

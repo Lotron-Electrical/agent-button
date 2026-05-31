@@ -3,6 +3,7 @@
 // single Durable Object (strongly consistent, instant read-after-write — unlike KV, which
 // caches reads at the edge for up to 60s and would make the poller miss fresh tasks).
 import HTML from './app.html';
+import AGENTS from './agents.html';
 import ICON192 from './icon-192.png';
 import ICON512 from './icon-512.png';
 
@@ -32,6 +33,11 @@ export default {
     // button page (capability URL)
     if (SECRET && p === '/p/' + SECRET) {
       const html = HTML.replaceAll('__SECRET__', SECRET).replaceAll('__START__', '/p/' + SECRET);
+      return new Response(html, { headers: { 'content-type': 'text/html;charset=utf-8' } });
+    }
+    // agent dashboard page (capability URL)
+    if (SECRET && p === '/p/' + SECRET + '/agents') {
+      const html = AGENTS.replaceAll('__SECRET__', SECRET).replaceAll('__START__', '/p/' + SECRET);
       return new Response(html, { headers: { 'content-type': 'text/html;charset=utf-8' } });
     }
     if (SECRET && p === '/p/' + SECRET + '/manifest.webmanifest') {
@@ -88,6 +94,17 @@ export default {
       return queueStub(env).fetch('https://do/status/' + encodeURIComponent(id), { method: 'POST' });
     }
 
+    // ---- live agents: PC reports them, phone dashboard reads them ----
+    if (p === '/agents' && method === 'POST') {
+      if (!authed()) return json({ error: 'unauthorized' }, 401);
+      const body = await req.text();
+      return queueStub(env).fetch('https://do/agentset', { method: 'POST', body });
+    }
+    if (p === '/agents') {
+      if (!authed()) return json({ error: 'unauthorized' }, 401);
+      return queueStub(env).fetch('https://do/agentget', { method: 'POST' });
+    }
+
     return new Response('not found', { status: 404 });
   }
 };
@@ -135,6 +152,15 @@ export class QueueDO {
       const q = (await this.storage.get('queue')) || [];
       if (q.some((x) => x.id === id)) return json({ id, status: 'pending' });
       return json({ id, status: 'unknown' });
+    }
+
+    if (op === 'agentset') {
+      const body = await request.json();
+      await this.storage.put('agents', { agents: body.agents || [], host: body.host || null, ts: body.ts || Date.now() });
+      return json({ ok: true, n: (body.agents || []).length });
+    }
+    if (op === 'agentget') {
+      return json((await this.storage.get('agents')) || { agents: [], ts: 0 });
     }
 
     return new Response('do: not found', { status: 404 });

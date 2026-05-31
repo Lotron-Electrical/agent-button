@@ -100,7 +100,9 @@ function spawnTab({ id, i, count, cwd, autoClose, promptText }) {
     const title = `PhoneAgent-${id.slice(-5)}-${i}`;
     const doneFlag = path.join(SPAWN_DIR, `agent-${id}-${i}.done`);
     try { fs.unlinkSync(doneFlag); } catch (_) {}
-    const args = [CLAUDE_TAB, '--title', title, '--cwd', cwd, '--prompt', promptText];
+    // --remote-control makes the session chat-drivable from the phone and gives it a
+    // clean name in the session registry, so it shows up in the agent dashboard.
+    const args = [CLAUDE_TAB, '--title', title, '--cwd', cwd, '--prompt', promptText, '--remote-control', title];
     if (autoClose) args.push('--done-flag', toMsys(doneFlag), '--grace-sec', '120');
     else args.push('--no-auto-close');
     let settled = false;
@@ -116,6 +118,45 @@ function spawnTab({ id, i, count, cwd, autoClose, promptText }) {
     child.on('spawn', () => { try { child.unref(); } catch (_) {} finish(true); });
     setTimeout(() => { try { child.unref(); } catch (_) {} finish(true, 'assumed-ok'); }, 2000);
   });
+}
+
+// ---------- live-agent reporting (for the dashboard) ----------
+// Claude Code writes ~/.claude/sessions/<pid>.json per live session, with name,
+// status, cwd, and bridgeSessionId (-> claude.ai/code/<id> chat URL). We read it,
+// keep only sessions whose PID is still alive, and push the list to the relay.
+function alivePid(pid) {
+  try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; }
+}
+async function reportAgents() {
+  const dir = path.join(os.homedir(), '.claude', 'sessions');
+  let files = [];
+  try { files = fs.readdirSync(dir).filter((f) => f.endsWith('.json')); } catch (_) { return 0; }
+  const agents = [];
+  for (const f of files) {
+    let d;
+    try { d = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')); } catch (_) { continue; }
+    if (!d || !d.pid || !alivePid(d.pid)) continue;
+    const name = String(d.name || ('pid ' + d.pid)).replace(/^claude-tab:/, '').replace(/_$/, '');
+    agents.push({
+      name,
+      pid: d.pid,
+      status: d.status || 'unknown',
+      chat: d.bridgeSessionId ? ('https://claude.ai/code/' + d.bridgeSessionId) : null,
+      cwd: d.cwd || null,
+      startedAt: d.startedAt || null,
+      updatedAt: d.updatedAt || null,
+      kind: d.kind || null
+    });
+  }
+  agents.sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0));
+  try {
+    await fetch(RELAY + '/agents', {
+      method: 'POST',
+      headers: { ...headers, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ agents, host: os.hostname(), ts: Date.now() })
+    });
+  } catch (_) {}
+  return agents.length;
 }
 
 async function handle(t) {
@@ -151,7 +192,7 @@ async function ack(id, spawned, error) {
 }
 
 async function loop() {
-  log('poller online -> ' + RELAY + ' (every ' + POLL_MS + 'ms, default cwd ' + DEFAULT_CWD + ')');
+  log('poller online -> ' + RELAY + ' (every ' + POLL_MS + 'ms, default cwd ' + DEFAULT_CWD + ', reporting live agents)');
   for (;;) {
     try {
       const r = await fetch(RELAY + '/next', { headers });
@@ -163,6 +204,7 @@ async function loop() {
       // network blips are normal (relay cold start etc.) — log sparsely
       if (!loop._q) { log('poll error:', e.message); loop._q = 1; setTimeout(() => (loop._q = 0), 60000); }
     }
+    try { await reportAgents(); } catch (_) {}
     await sleep(POLL_MS);
   }
 }

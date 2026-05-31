@@ -26,8 +26,10 @@
   }
   header{display:flex; align-items:center; gap:10px; margin-bottom:18px}
   .dot{width:10px; height:10px; border-radius:50%; background:var(--accent); box-shadow:0 0 12px var(--accent)}
-  h1{font-size:17px; margin:0; letter-spacing:.5px; font-weight:600}
+  h1{font-size:17px; margin:0; letter-spacing:.5px; font-weight:600; flex:1}
   h1 span{color:var(--dim); font-weight:400}
+  .navlink{font-size:13px; color:var(--accent2); text-decoration:none; border:1px solid var(--line); padding:7px 11px; border-radius:10px; white-space:nowrap}
+  .navlink:active{background:var(--panel)}
   label{display:block; font-size:12px; color:var(--dim); margin:0 0 7px 2px; letter-spacing:.4px; text-transform:uppercase}
   textarea{
     width:100%; min-height:128px; resize:vertical; background:var(--panel); color:var(--ink);
@@ -75,7 +77,7 @@
 </style>
 </head>
 <body>
-  <header><div class="dot"></div><h1>SPAWN AGENTS <span>// your PC</span></h1></header>
+  <header><div class="dot"></div><h1>SPAWN AGENTS <span>// your PC</span></h1><a class="navlink" href="__START__/agents">Agents →</a></header>
 
   <label for="task">Task</label>
   <textarea id="task" placeholder="What should the agents work on?&#10;e.g. review open PRs and summarise risks" autofocus></textarea>
