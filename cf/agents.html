@@ -59,6 +59,11 @@
         color:#1a0f0a; background:linear-gradient(135deg,var(--accent2),var(--accent)); box-shadow:0 6px 18px rgba(193,95,60,.3)}
   .empty{text-align:center; color:var(--dim); font-size:14px; line-height:2; margin-top:50px}
   .empty a{color:var(--accent2)}
+  .seclabel{font-size:11px; color:var(--dim); letter-spacing:.6px; text-transform:uppercase; margin:20px 4px 10px; border-top:1px solid var(--line); padding-top:14px}
+  .extcard{background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:14px; margin-bottom:12px}
+  .extlink{display:block; text-align:center; padding:11px; border-radius:11px; font-size:14px; font-weight:600; color:var(--accent2); border:1px solid var(--line); background:var(--panel2); text-decoration:none}
+  .extlink:active{border-color:var(--accent)}
+  .extnochat{text-align:center; padding:8px; font-size:12px; color:var(--dim)}
   .foot{text-align:center; color:var(--dim); font-size:11px; margin-top:18px; opacity:.7}
 </style>
 </head>
@@ -71,6 +76,8 @@
   <div class="stats" id="stats" style="display:none"></div>
   <div class="sub" id="sub">loading…</div>
   <div id="list"></div>
+  <div class="seclabel" id="extlabel" style="display:none">Other live agents on this PC</div>
+  <div id="ext"></div>
   <div class="foot">tap an agent to chat · × to close · refreshes every 3s</div>
 
 <script>
@@ -82,7 +89,7 @@ function api(p, opts){ return fetch(p, { ...(opts||{}), headers: { Authorization
 function ago(ts){ if(!ts) return ''; let s=Math.max(0,Math.round((Date.now()-ts)/1000)); if(s<60)return s+'s'; if(s<3600)return Math.round(s/60)+'m'; return Math.round(s/3600)+'h'; }
 function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 function shortCwd(c){ if(!c) return ''; return c.replace(/^[A-Za-z]:\\Users\\[^\\]+/, '~').replace(/^\/[a-z]\/Users\/[^/]+/i,'~').replace(/\\/g,'/'); }
-function statusInfo(s){ s=String(s||'').toLowerCase(); if(s==='thinking'||s==='busy')return{label:'working',cls:'busy'}; if(s==='idle')return{label:'idle',cls:'idle'}; if(s==='error')return{label:'error',cls:'err'}; return{label:s||'new',cls:'other'}; }
+function statusInfo(s){ s=String(s||'').toLowerCase(); if(s==='thinking'||s==='busy')return{label:'working',cls:'busy'}; if(s==='idle')return{label:'idle',cls:'idle'}; if(s==='live')return{label:'live',cls:'idle'}; if(s==='error')return{label:'error',cls:'err'}; return{label:s||'new',cls:'other'}; }
 
 function renderStats(st){
   const el = $('stats');
@@ -97,6 +104,18 @@ function renderStats(st){
     '<div class="shost'+(fresh?'':' off')+'"><span class="live"></span>'+esc(st.host||'PC')+(fresh?' · online '+ago(st.ts)+' ago':' · last seen '+ago(st.ts)+' ago')+(st.uptimeH?' · up '+st.uptimeH+'h':'')+'</div>';
 }
 
+function renderExternal(external){
+  if(!external || !external.length){ $('extlabel').style.display='none'; $('ext').innerHTML=''; return; }
+  $('extlabel').style.display='block';
+  $('ext').innerHTML = external.map(a => {
+    const st = statusInfo(a.status);
+    const meta = shortCwd(a.cwd);
+    const action = a.chat
+      ? '<a class="extlink" href="'+esc(a.chat)+'" target="_blank" rel="noopener">Open in Claude ↗</a>'
+      : '<div class="extnochat">running · no chat link</div>';
+    return '<div class="extcard"><div class="top"><span class="name">'+esc(a.name)+'</span><span class="badge '+st.cls+'">'+esc(st.label)+'</span></div>'+(meta?'<div class="meta">'+esc(meta)+'</div>':'')+action+'</div>';
+  }).join('');
+}
 function render(agents){
   if(!agents.length){ $('list').innerHTML = '<div class="empty">No agents yet.<br>Start one and chat with it right here.<br><a href="'+START+'">New agent →</a></div>'; return; }
   $('list').innerHTML = agents.map(a => {
@@ -131,6 +150,7 @@ async function refresh(){
   renderStats(data.stats);
   $('sub').innerHTML = agents.length+' agent'+(agents.length===1?'':'s')+(working?' · '+working+' working':'');
   render(agents);
+  renderExternal(data.external || []);
 }
 refresh();
 setInterval(refresh, 3000);

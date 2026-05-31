@@ -129,6 +129,10 @@ export default {
       if (!authed()) return json({ error: 'unauthorized' }, 401);
       return queueStub(env).fetch('https://do/statsset', { method: 'POST', body: await req.text() });
     }
+    if (p === '/external' && method === 'POST') {             // poller: report other live Claude tabs
+      if (!authed()) return json({ error: 'unauthorized' }, 401);
+      return queueStub(env).fetch('https://do/externalset', { method: 'POST', body: await req.text() });
+    }
     if (p === '/agents') {                                   // dashboard: list chat agents + stats
       if (!authed()) return json({ error: 'unauthorized' }, 401);
       return queueStub(env).fetch('https://do/chatlist', { method: 'POST' });
@@ -219,10 +223,22 @@ export class QueueDO {
       return json({ agent: agents.find((a) => a.id === id) || null, messages: (await this.storage.get('msgs:' + id)) || [] });
     }
     if (op === 'chatlist') {
-      return json({ agents: (await this.storage.get('chatagents')) || [], stats: (await this.storage.get('stats')) || null, ts: Date.now() });
+      return json({
+        agents: (await this.storage.get('chatagents')) || [],
+        external: (await this.storage.get('external')) || [],
+        externalTs: (await this.storage.get('externalTs')) || 0,
+        stats: (await this.storage.get('stats')) || null,
+        ts: Date.now()
+      });
     }
     if (op === 'statsset') {
       await this.storage.put('stats', await request.json());
+      return json({ ok: true });
+    }
+    if (op === 'externalset') {
+      const b = await request.json();
+      await this.storage.put('external', b.external || []);
+      await this.storage.put('externalTs', b.ts || Date.now());
       return json({ ok: true });
     }
     if (op === 'jobnext') {

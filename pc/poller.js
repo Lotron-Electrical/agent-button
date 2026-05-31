@@ -244,6 +244,57 @@ async function reportStats() {
   } catch (_) {}
 }
 
+// ---------- other live agents (any Claude Code terminal tab, not just app ones) ----------
+const SCREENSHOT_EXE = path.join(os.homedir(), '.claude', 'screenshot.exe');
+let externalBusy = false;
+function listAgentTabs() {
+  return new Promise((resolve) => {
+    if (!fs.existsSync(SCREENSHOT_EXE)) return resolve([]);
+    let out = '', child;
+    try { child = spawn(SCREENSHOT_EXE, ['--list'], { env: SPAWN_ENV, stdio: ['ignore', 'pipe', 'ignore'] }); }
+    catch (_) { return resolve([]); }
+    child.stdout.on('data', (d) => { out += d; });
+    child.on('error', () => resolve([]));
+    child.on('close', () => {
+      const names = [];
+      for (const line of out.split(/\r?\n/)) {
+        // "N. ? <name>" or "N. Administrator: ? <name>" marks a Windows Terminal (Claude) tab
+        const m = line.match(/^\s*\d+\.\s*(?:Administrator:\s*)?\?\s*(.+?)\s*$/);
+        if (m && m[1]) names.push(m[1].replace(/^claude-tab:/, '').replace(/_$/, '').trim());
+      }
+      resolve([...new Set(names)]);
+    });
+  });
+}
+async function reportExternal() {
+  if (externalBusy) return;
+  externalBusy = true;
+  try {
+    const names = await listAgentTabs();
+    // enrich from the session registry where a live session matches the tab name
+    const sess = {};
+    try {
+      const dir = path.join(os.homedir(), '.claude', 'sessions');
+      for (const f of fs.readdirSync(dir).filter((x) => x.endsWith('.json'))) {
+        let d; try { d = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')); } catch (_) { continue; }
+        if (!d.pid || !alivePid(d.pid)) continue;
+        const nm = String(d.name || '').replace(/^claude-tab:/, '').replace(/_$/, '');
+        if (nm) sess[nm] = d;
+      }
+    } catch (_) {}
+    const external = names.map((name) => {
+      const d = sess[name];
+      return {
+        name,
+        status: d && d.status ? d.status : 'live',
+        chat: d && d.bridgeSessionId ? ('https://claude.ai/code/' + d.bridgeSessionId) : null,
+        cwd: d ? d.cwd : null
+      };
+    });
+    await fetch(RELAY + '/external', { method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify({ external, ts: Date.now() }) });
+  } catch (_) {} finally { externalBusy = false; }
+}
+
 async function handle(t) {
   const id = t.id;
   const count = Math.max(1, Math.min(4, t.count || 1));
@@ -291,6 +342,7 @@ async function loop() {
     }
     pollChat(); // fire-and-forget; guarded by chatInFlight
     reportStats(); // fire-and-forget; reports RAM/CPU to the dashboard
+    reportExternal(); // fire-and-forget; reports other live Claude terminal tabs
     await sleep(POLL_MS);
   }
 }
