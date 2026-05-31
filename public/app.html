@@ -58,7 +58,7 @@
     margin-top:14px; min-height:20px; font-size:14px; text-align:center; color:var(--dim);
     display:flex; align-items:center; justify-content:center; gap:8px;
   }
-  .status.go{color:var(--accent2)} .status.err{color:var(--err)}
+  .status.go{color:var(--accent2)} .status.ok{color:var(--ok)} .status.err{color:var(--err)}
   .spin{width:13px; height:13px; border:2px solid currentColor; border-top-color:transparent; border-radius:50%; animation:s .7s linear infinite}
   @keyframes s{to{transform:rotate(360deg)}}
   .hint{margin-top:10px; font-size:12px; color:var(--dim); text-align:center; opacity:.85}
@@ -88,7 +88,7 @@
 
   <button class="spawn" id="go">START AGENT</button>
   <div class="status" id="status"></div>
-  <div class="hint">it starts working on your PC and you drop into its chat</div>
+  <div class="hint">opens a real Claude Code terminal on your PC · drive it there or from its chat link</div>
 
 <script>
 const SECRET = "__SECRET__";
@@ -102,15 +102,14 @@ async function start(){
   const task = $('task').value.trim();
   if (!task){ setStatus('Type a task first','err'); $('task').focus(); return; }
   const cwd = $('cwd').value.trim();
-  const mode = $('endless').checked ? 'endless' : 'chat';
-  const title = task.split('\n')[0].slice(0,48);
-  $('go').disabled = true; haptic(20); setStatus(mode==='endless'?'Starting endless agent…':'Starting agent…','go');
+  const endless = $('endless').checked;
+  $('go').disabled = true; haptic(20); setStatus('Opening a terminal on your PC…','go');
   try{
-    const r = await api('/chat/new', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ title, message: task, cwd, mode }) });
+    const r = await api('/spawn', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ task, cwd, endless }) });
     if (!r.ok) throw new Error('relay '+r.status);
-    const { id } = await r.json();
     haptic([15,40,15]);
-    location.href = START + '/chat?id=' + encodeURIComponent(id);
+    setStatus('Terminal opening · it will appear in Agents with its chat link','ok');
+    setTimeout(()=>{ location.href = START + '/agents'; }, 1400);
   } catch(e){ setStatus('Could not reach relay ('+e.message+')','err'); $('go').disabled = false; }
 }
 $('go').addEventListener('click', start);

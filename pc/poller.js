@@ -162,7 +162,8 @@ async function reportAgents() {
 // ---------- in-app chat: run one Claude Code turn per message, headless ----------
 const CHAT_DIR = path.join(SPAWN_DIR, 'chat');
 try { fs.mkdirSync(CHAT_DIR, { recursive: true }); } catch (_) {}
-const MAX_CHAT = 2;
+const MAX_CHAT = 3;
+const TURN_TIMEOUT_MS = 15 * 60 * 1000; // kill a chat turn that runs longer than this so a hang can't jam a slot forever
 let chatInFlight = 0;
 const bq = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'"; // single-quote for bash
 
@@ -177,18 +178,27 @@ function runClaudeTurn(job) {
     const resume = job.sessionId ? ('--resume ' + bq(job.sessionId) + ' ') : '';
     const cmd = 'cd ' + bq(cwdMsys) + ' && claude -p "$(cat ' + bq(toMsys(msgFile)) + ')" ' + resume +
                 '--output-format json --dangerously-skip-permissions';
-    let out = '', err = '', child;
+    let out = '', err = '', child, settled = false, timer = null;
+    const finish = (res) => {
+      if (settled) return; settled = true;
+      if (timer) clearTimeout(timer);
+      try { fs.unlinkSync(msgFile); } catch (_) {}
+      resolve(res);
+    };
     try { child = spawn(BASH, ['-c', cmd], { env: SPAWN_ENV, stdio: ['ignore', 'pipe', 'pipe'] }); }
-    catch (e) { return resolve({ error: 'spawn: ' + e.message }); }
+    catch (e) { return finish({ error: 'spawn: ' + e.message }); }
+    timer = setTimeout(() => {
+      try { execSync('taskkill /PID ' + child.pid + ' /T /F', { stdio: 'ignore' }); } catch (_) {}
+      finish({ error: 'turn timed out after ' + Math.round(TURN_TIMEOUT_MS / 60000) + ' min and was killed' });
+    }, TURN_TIMEOUT_MS);
     child.stdout.on('data', (d) => { out += d; });
     child.stderr.on('data', (d) => { err += d; });
-    child.on('error', (e) => resolve({ error: 'spawn: ' + e.message }));
+    child.on('error', (e) => finish({ error: 'spawn: ' + e.message }));
     child.on('close', (code) => {
-      try { fs.unlinkSync(msgFile); } catch (_) {}
       let j = null; try { j = JSON.parse(out); } catch (_) {}
-      if (j && typeof j.result === 'string' && !j.is_error) resolve({ reply: j.result, sessionId: j.session_id || job.sessionId });
-      else if (j && typeof j.result === 'string') resolve({ error: 'agent: ' + j.result.slice(0, 400), sessionId: j.session_id || job.sessionId });
-      else resolve({ error: (err.trim().slice(0, 300) || ('claude exited ' + code + ' with no JSON')) });
+      if (j && typeof j.result === 'string' && !j.is_error) finish({ reply: j.result, sessionId: j.session_id || job.sessionId });
+      else if (j && typeof j.result === 'string') finish({ error: 'agent: ' + j.result.slice(0, 400), sessionId: j.session_id || job.sessionId });
+      else finish({ error: (err.trim().slice(0, 300) || ('claude exited ' + code + ' with no JSON')) });
     });
   });
 }
@@ -212,6 +222,24 @@ async function pollChat() {
   } catch (_) {}
   chatInFlight--;
   log('chat turn done -> ' + job.agentId + (res.error ? (' ERROR: ' + res.error) : ''));
+}
+
+// ---------- spawn real interactive terminal agents (claude-tab.sh + Remote Control) ----------
+async function pollSpawn() {
+  let s = null;
+  try {
+    const r = await fetch(RELAY + '/spawn-next', { headers });
+    if (r.ok) { const j = await r.json(); if (!j.empty) s = j; }
+  } catch (_) { return; }
+  if (!s) return;
+  const cwd = s.cwd && String(s.cwd).trim() ? toMsys(String(s.cwd).trim()) : DEFAULT_CWD;
+  log('spawn terminal -> ' + s.name + ' (cwd ' + cwd + ')');
+  const args = [CLAUDE_TAB, '--title', s.name, '--cwd', cwd, '--prompt', String(s.prompt || ''), '--remote-control', s.name, '--no-auto-close'];
+  try {
+    const child = spawn(BASH, args, { env: SPAWN_ENV, detached: true, stdio: 'ignore' });
+    child.on('error', (e) => log('spawn terminal error ' + s.name + ': ' + e.message));
+    child.unref();
+  } catch (e) { log('spawn terminal failed ' + s.name + ': ' + e.message); }
 }
 
 // ---------- PC stats (RAM / CPU) for the dashboard ----------
@@ -341,8 +369,9 @@ async function loop() {
       if (!loop._q) { log('poll error:', e.message); loop._q = 1; setTimeout(() => (loop._q = 0), 60000); }
     }
     pollChat(); // fire-and-forget; guarded by chatInFlight
+    pollSpawn(); // fire-and-forget; opens any queued real terminal agents
     reportStats(); // fire-and-forget; reports RAM/CPU to the dashboard
-    reportExternal(); // fire-and-forget; reports other live Claude terminal tabs
+    reportExternal(); // fire-and-forget; reports live Claude terminal tabs
     await sleep(POLL_MS);
   }
 }

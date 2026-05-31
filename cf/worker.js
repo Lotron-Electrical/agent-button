@@ -123,6 +123,14 @@ export default {
       if (!authed()) return json({ error: 'unauthorized' }, 401);
       return queueStub(env).fetch('https://do/chatstop', { method: 'POST', body: await req.text() });
     }
+    if (p === '/spawn' && method === 'POST') {               // phone: spawn a real interactive terminal agent
+      if (!authed()) return json({ error: 'unauthorized' }, 401);
+      return queueStub(env).fetch('https://do/spawnnew', { method: 'POST', body: await req.text() });
+    }
+    if (p === '/spawn-next') {                               // poller: pull the next terminal to open
+      if (!authed()) return json({ error: 'unauthorized' }, 401);
+      return queueStub(env).fetch('https://do/spawnnext', { method: 'POST' });
+    }
     if (p === '/chat/get') {                                 // phone: fetch a conversation
       if (!authed()) return json({ error: 'unauthorized' }, 401);
       return queueStub(env).fetch('https://do/chatget?id=' + encodeURIComponent(url.searchParams.get('id') || ''), { method: 'POST' });
@@ -308,6 +316,29 @@ export class QueueDO {
       msgs.push({ role: 'system', text: 'Endless mode stopped. The agent will wait for your next message.', ts: Date.now() });
       await this.storage.put('msgs:' + b.id, msgs);
       return json({ ok: true });
+    }
+
+    // ---- terminal-agent spawn queue (real interactive Claude Code windows) ----
+    if (op === 'spawnnew') {
+      const b = await request.json(); // {task, cwd, endless}
+      const task = String(b.task || '').trim();
+      if (!task) return json({ error: 'task required' }, 400);
+      const slug = (task.split('\n')[0].toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 22)) || 'agent';
+      const name = 'ag-' + slug + '-' + crypto.randomUUID().replace(/-/g, '').slice(0, 4);
+      const prompt = b.endless
+        ? (task + '\n\nWork autonomously and keep going until this is fully solved and verified. Do not stop or wait for further input until it is done.')
+        : task;
+      const spawns = (await this.storage.get('spawns')) || [];
+      spawns.push({ name, prompt, cwd: String(b.cwd || ''), ts: Date.now() });
+      await this.storage.put('spawns', spawns.slice(-20));
+      return json({ ok: true, name });
+    }
+    if (op === 'spawnnext') {
+      const spawns = (await this.storage.get('spawns')) || [];
+      if (!spawns.length) return json({ empty: true });
+      const s = spawns.shift();
+      await this.storage.put('spawns', spawns);
+      return json(s);
     }
 
     return new Response('do: not found', { status: 404 });
