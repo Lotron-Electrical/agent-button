@@ -8,6 +8,7 @@ const { spawn, execSync } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { closeSuperseded } = require('./solve-reap'); // reap superseded solve-relay tabs
 
 // ---------- config ----------
 const cfgPath = process.env.AGENT_BUTTON_ENV || path.join(os.homedir(), '.agent-button.env');
@@ -362,6 +363,24 @@ async function pollSolveWatch() {
   } catch (_) {} finally { watchBusy = false; }
 }
 
+// ---------- Solve-mode tab cleanup ----------
+// Close superseded solve-relay tabs: when a NEWER generation (sv<id>-g<N>) is confirmed
+// running, older generations of the same relay are finished husks. Reap them so dead
+// tabs don't pile up. Safe: only closes a gen when a strictly newer gen of the SAME
+// relay has a live session that's been up >30s; never closes the newest; 60s startup
+// grace after a poller restart. SOLVE_REAP=off disables; SOLVE_REAP=dryrun logs only.
+const SOLVE_REAP_MODE = String(cfg.SOLVE_REAP || process.env.SOLVE_REAP || 'on').toLowerCase();
+let reapBusy = false, lastReap = 0;
+function pollSolveReap() {
+  if (SOLVE_REAP_MODE === 'off') return;
+  const now = Date.now();
+  if (reapBusy || now - lastReap < 12000) return;
+  reapBusy = true; lastReap = now;
+  try { closeSuperseded({ dryRun: SOLVE_REAP_MODE === 'dryrun', log }); }
+  catch (e) { log('solve reap error: ' + e.message); }
+  finally { reapBusy = false; }
+}
+
 async function handle(t) {
   const id = t.id;
   const count = Math.max(1, Math.min(4, t.count || 1));
@@ -412,6 +431,7 @@ async function loop() {
     reportStats(); // fire-and-forget; reports RAM/CPU to the dashboard
     reportExternal(); // fire-and-forget; reports live Claude terminal tabs
     pollSolveWatch(); // fire-and-forget; keeps Solve relays alive (throttled to 1/min)
+    pollSolveReap(); // fire-and-forget; closes superseded solve-relay tabs (throttled to ~12s)
     await sleep(POLL_MS);
   }
 }
