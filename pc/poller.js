@@ -413,6 +413,18 @@ async function ack(id, spawned, error) {
   } catch (e) { log('ack failed', e.message); }
 }
 
+// Dashboard telemetry (RAM/CPU + live Claude tabs) doesn't need 4s freshness. Throttling these
+// two reports to 30s removes 2 Durable-Object requests from most poll loops — the difference
+// between blowing and staying under Cloudflare's 100k/day DO free tier on an idle machine.
+let lastReport = 0;
+function maybeReport() {
+  const now = Date.now();
+  if (now - lastReport < 30000) return;
+  lastReport = now;
+  reportStats();    // fire-and-forget; reports RAM/CPU to the dashboard
+  reportExternal(); // fire-and-forget; reports live Claude terminal tabs
+}
+
 async function loop() {
   log('poller online -> ' + RELAY + ' (every ' + POLL_MS + 'ms, default cwd ' + DEFAULT_CWD + ', reporting live agents)');
   for (;;) {
@@ -428,8 +440,7 @@ async function loop() {
     }
     pollChat(); // fire-and-forget; guarded by chatInFlight
     pollSpawn(); // fire-and-forget; opens any queued real terminal agents
-    reportStats(); // fire-and-forget; reports RAM/CPU to the dashboard
-    reportExternal(); // fire-and-forget; reports live Claude terminal tabs
+    maybeReport(); // fire-and-forget; throttled RAM/CPU + live-tab reports (every 30s — keeps idle Durable-Object usage well under CF's 100k/day free tier)
     pollSolveWatch(); // fire-and-forget; keeps Solve relays alive (throttled to 1/min)
     pollSolveReap(); // fire-and-forget; closes superseded solve-relay tabs (throttled to ~12s)
     await sleep(POLL_MS);
