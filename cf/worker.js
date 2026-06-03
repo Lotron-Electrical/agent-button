@@ -78,6 +78,13 @@ export default {
       return SECRET && tok === SECRET;
     };
 
+    // WebSocket upgrade: the PC poller's push channel. Forward to the DO, which owns the socket.
+    if (p === '/ws') {
+      if ((req.headers.get('Upgrade') || '').toLowerCase() !== 'websocket') return json({ error: 'expected websocket' }, 426);
+      if (!authed()) return json({ error: 'unauthorized' }, 401);
+      return queueStub(env).fetch(req);
+    }
+
     if (p === '/health') return json({ ok: true });
 
     // button page (capability URL)
@@ -242,10 +249,41 @@ export default {
 // Strongly-consistent queue. One instance ('main') serializes all ops.
 export class QueueDO {
   constructor(state, env) {
+    this.state = state;
     this.storage = state.storage;
     this.env = env;
   }
+
+  // Nudge every connected poller that there is work to pull. Uses getWebSockets() (the live socket
+  // set) rather than an in-memory list, so it still works after the DO has hibernated and woken.
+  wake(what) {
+    const msg = JSON.stringify({ type: 'wake', what: what || 'work', ts: Date.now() });
+    for (const ws of this.state.getWebSockets()) { try { ws.send(msg); } catch (_) {} }
+  }
+  // Ask the poller for a fresh stats/external push. Only fired while the dashboard is open.
+  nudgeStats() {
+    const msg = JSON.stringify({ type: 'wantStats', ts: Date.now() });
+    for (const ws of this.state.getWebSockets()) { try { ws.send(msg); } catch (_) {} }
+  }
+  async webSocketMessage(ws, message) {
+    try {
+      const m = typeof message === 'string' ? JSON.parse(message) : null;
+      if (m && m.type === 'hello') ws.send(JSON.stringify({ type: 'hello-ack', ts: Date.now() }));
+    } catch (_) {}
+  }
+  async webSocketClose(ws, code) { try { ws.close(code || 1000, 'bye'); } catch (_) {} }
+  async webSocketError() {}
+
   async fetch(request) {
+    // The poller's push channel: accept a hibernatable WebSocket. While idle the DO hibernates
+    // (no compute, no request billing) and ping/pong is auto-answered at the edge; producer ops
+    // below call this.wake() to nudge the poller the instant work is queued. No busy-polling.
+    if ((request.headers.get('Upgrade') || '').toLowerCase() === 'websocket') {
+      const pair = new WebSocketPair();
+      this.state.acceptWebSocket(pair[1]);
+      try { this.state.setWebSocketAutoResponse(new WebSocketRequestResponsePair('ping', 'pong')); } catch (_) {}
+      return new Response(null, { status: 101, webSocket: pair[0] });
+    }
     const op = new URL(request.url).pathname.slice(1); // 'enqueue' | 'next' | 'ack' | 'status/<id>'
 
     if (op === 'enqueue') {
@@ -255,6 +293,7 @@ export class QueueDO {
       while (q.length > 50) q.shift();
       await this.storage.put('queue', q);
       await this.storage.put('a:' + item.id, { id: item.id, status: 'pending', ts: Date.now() });
+      this.wake('task');
       return json({ ok: true, id: item.id, queued: q.length });
     }
 
@@ -298,6 +337,7 @@ export class QueueDO {
       const jobs = (await this.storage.get('jobs')) || [];
       jobs.push({ agentId: id, message: endless ? wrapEndless(b.message) : String(b.message || ''), ts: now });
       await this.storage.put('jobs', jobs);
+      this.wake('chat');
       return json({ ok: true, id });
     }
     if (op === 'chatsend') {
@@ -315,6 +355,7 @@ export class QueueDO {
       const jobs = (await this.storage.get('jobs')) || [];
       jobs.push({ agentId: b.id, message: ag.mode === 'endless' ? wrapEndless(b.message) : String(b.message || ''), ts: now });
       await this.storage.put('jobs', jobs);
+      this.wake('chat');
       return json({ ok: true });
     }
     if (op === 'chatget') {
@@ -323,12 +364,15 @@ export class QueueDO {
       return json({ agent: agents.find((a) => a.id === id) || null, messages: (await this.storage.get('msgs:' + id)) || [] });
     }
     if (op === 'chatlist') {
+      const stats = (await this.storage.get('stats')) || null;
+      // dashboard is open and polling -> ask the poller for fresh telemetry, but only when it's stale.
+      if (!stats || Date.now() - (stats.ts || 0) > 4000) this.nudgeStats();
       return json({
         agents: (await this.storage.get('chatagents')) || [],
         external: (await this.storage.get('external')) || [],
         externalTs: (await this.storage.get('externalTs')) || 0,
         solves: (await this.storage.get('solves')) || [],
-        stats: (await this.storage.get('stats')) || null,
+        stats,
         ts: Date.now()
       });
     }
@@ -371,6 +415,7 @@ export class QueueDO {
           const jobs = (await this.storage.get('jobs')) || [];
           jobs.push({ agentId: ag.id, message: wrapEndless(CONTINUE_MSG), ts: now });
           await this.storage.put('jobs', jobs);
+          this.wake('chat');
         }
       } else {
         ag.status = b.error ? 'error' : 'idle';
@@ -412,6 +457,7 @@ export class QueueDO {
       const spawns = (await this.storage.get('spawns')) || [];
       spawns.push({ name, prompt, cwd: String(b.cwd || ''), ts: Date.now() });
       await this.storage.put('spawns', spawns.slice(-20));
+      this.wake('spawn');
       return json({ ok: true, name });
     }
     if (op === 'spawnnext') {
@@ -436,6 +482,7 @@ export class QueueDO {
       const spawns = (await this.storage.get('spawns')) || [];
       spawns.push({ name: solveId + '-g1', prompt: buildSolvePrompt(goal, 1, solveId, b.relay || '', this.env.BUTTON_TOKEN, true), cwd, ts: now });
       await this.storage.put('spawns', spawns.slice(-20));
+      this.wake('solve');
       return json({ ok: true, id: solveId });
     }
     if (op === 'solvenext') {
@@ -455,6 +502,7 @@ export class QueueDO {
       const spawns = (await this.storage.get('spawns')) || [];
       spawns.push({ name: sv.id + '-g' + sv.generation, prompt: buildSolvePrompt(sv.goal, sv.generation, sv.id, b.relay || '', this.env.BUTTON_TOKEN, false), cwd: sv.cwd, ts: now });
       await this.storage.put('spawns', spawns.slice(-20));
+      this.wake('solve');
       return json({ ok: true, generation: sv.generation });
     }
     if (op === 'solvedone') {
@@ -492,6 +540,7 @@ export class QueueDO {
       const spawns = (await this.storage.get('spawns')) || [];
       spawns.push({ name: sv.id + '-g' + sv.generation, prompt: buildSolvePrompt(sv.goal, sv.generation, sv.id, b.relay || '', this.env.BUTTON_TOKEN, false), cwd: sv.cwd, ts: now });
       await this.storage.put('spawns', spawns.slice(-20));
+      this.wake('solve');
       return json({ ok: true, generation: sv.generation });
     }
     if (op === 'solvestop') {                                // phone: hard-stop a relay
@@ -528,6 +577,7 @@ export class QueueDO {
         respawned.push(sv.id + '-g' + sv.generation); changed = true;
       }
       if (changed) { await this.storage.put('solves', solves); await this.storage.put('spawns', spawns.slice(-20)); }
+      if (respawned.length) this.wake('solve');
       return json({ respawned, paused });
     }
     if (op === 'solvedelete') {                              // phone: remove a relay from the list

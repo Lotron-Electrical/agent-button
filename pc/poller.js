@@ -204,25 +204,32 @@ function runClaudeTurn(job) {
   });
 }
 
-async function pollChat() {
-  if (chatInFlight >= MAX_CHAT) return;
+// Pull one queued chat turn and run it (without blocking the drain). Returns true if a turn was
+// started. When the turn finishes it frees its slot and pulls the next queued turn itself, so a
+// backlog drains without busy-looping.
+async function tryStartChat() {
+  if (chatInFlight >= MAX_CHAT) return false;
   let job = null;
   try {
     const r = await fetch(RELAY + '/chat/jobnext', { headers });
     if (r.ok) { const j = await r.json(); if (!j.empty) job = j; }
-  } catch (_) { return; }
-  if (!job) return;
+  } catch (_) { return false; }
+  if (!job) return false;
   chatInFlight++;
   log('chat turn -> ' + job.agentId + (job.sessionId ? ' (resume)' : ' (new session)'));
-  const res = await runClaudeTurn(job);
-  try {
-    await fetch(RELAY + '/chat/result', {
-      method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ agentId: job.agentId, sessionId: res.sessionId || job.sessionId, reply: res.reply, error: res.error })
-    });
-  } catch (_) {}
-  chatInFlight--;
-  log('chat turn done -> ' + job.agentId + (res.error ? (' ERROR: ' + res.error) : ''));
+  (async () => {
+    const res = await runClaudeTurn(job);
+    try {
+      await fetch(RELAY + '/chat/result', {
+        method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ agentId: job.agentId, sessionId: res.sessionId || job.sessionId, reply: res.reply, error: res.error })
+      });
+    } catch (_) {}
+    chatInFlight--;
+    log('chat turn done -> ' + job.agentId + (res.error ? (' ERROR: ' + res.error) : ''));
+    tryStartChat(); // a slot freed; pick up the next queued turn if there is one
+  })();
+  return true;
 }
 
 // ---------- spawn real ELEVATED interactive terminal agents via the ClaudeCodeAdmin task ----------
@@ -231,13 +238,15 @@ async function pollChat() {
 // Its elevated wrapper (claude-code-admin-wrapper.ps1) runs our launcher, so the window is
 // truly elevated, identical to launching the shortcut by hand.
 const ADMIN_QUEUE = path.join(SPAWN_DIR, 'admin-queue');
-async function pollSpawn() {
+// Pull one queued elevated-terminal spawn and open it. Returns true if one was opened (or pulled but
+// failed to write), false if the queue was empty — so the drain knows when to stop.
+async function pollSpawnOnce() {
   let s = null;
   try {
     const r = await fetch(RELAY + '/spawn-next', { headers });
     if (r.ok) { const j = await r.json(); if (!j.empty) s = j; }
-  } catch (_) { return; }
-  if (!s) return;
+  } catch (_) { return false; }
+  if (!s) return false;
   const cwdMsys = s.cwd && String(s.cwd).trim() ? toMsys(String(s.cwd).trim()) : DEFAULT_CWD;
   try { fs.mkdirSync(ADMIN_QUEUE, { recursive: true }); } catch (_) {}
   const promptFile = path.join(ADMIN_QUEUE, s.name + '.prompt.txt');
@@ -256,10 +265,11 @@ async function pollSpawn() {
   try {
     fs.writeFileSync(promptFile, String(s.prompt || ''));
     fs.writeFileSync(launcherFile, launcher);
-  } catch (e) { log('admin spawn write failed ' + s.name + ': ' + e.message); return; }
+  } catch (e) { log('admin spawn write failed ' + s.name + ': ' + e.message); return true; }
   log('admin spawn -> ' + s.name + ' (queued; triggering ClaudeCodeAdmin task)');
   try { execSync('schtasks /run /tn ClaudeCodeAdmin', { stdio: 'ignore', timeout: 12000 }); }
   catch (e) { log('schtasks trigger failed for ' + s.name + ': ' + e.message); }
+  return true;
 }
 
 // ---------- PC stats (RAM / CPU) for the dashboard ----------
@@ -413,37 +423,91 @@ async function ack(id, spawned, error) {
   } catch (e) { log('ack failed', e.message); }
 }
 
-// Dashboard telemetry (RAM/CPU + live Claude tabs) doesn't need 4s freshness. Throttling these
-// two reports to 30s removes 2 Durable-Object requests from most poll loops — the difference
-// between blowing and staying under Cloudflare's 100k/day DO free tier on an idle machine.
-let lastReport = 0;
-function maybeReport() {
-  const now = Date.now();
-  if (now - lastReport < 30000) return;
-  lastReport = now;
-  reportStats();    // fire-and-forget; reports RAM/CPU to the dashboard
-  reportExternal(); // fire-and-forget; reports live Claude terminal tabs
-}
+// ============================================================================
+// Push transport (replaces the old busy-poll loop). The poller holds ONE WebSocket
+// open to the relay's Durable Object. While nothing is happening the DO hibernates and
+// we burn ~zero requests; the instant the phone queues work the DO pushes {type:'wake'}
+// and we drain once. ping/pong keepalive is auto-answered at the edge (free) and holds
+// the socket open through NAT. A 5-minute safety drain catches any missed wake, and the
+// Solve watchdog rides along on it. Telemetry is sent only when the dashboard asks.
+// ============================================================================
+const WS_URL = RELAY.replace(/^http/, 'ws') + '/ws?s=' + encodeURIComponent(TOKEN);
+let ws = null, wsBackoffMs = 1000, keepalive = null;
+let draining = false, drainAgain = false;
 
-async function loop() {
-  log('poller online -> ' + RELAY + ' (every ' + POLL_MS + 'ms, default cwd ' + DEFAULT_CWD + ', reporting live agents)');
-  for (;;) {
-    try {
-      const r = await fetch(RELAY + '/next', { headers });
-      if (r.ok) {
-        const j = await r.json();
-        if (!j.empty) await handle(j);
-      }
-    } catch (e) {
-      // network blips are normal (relay cold start etc.) — log sparsely
-      if (!loop._q) { log('poll error:', e.message); loop._q = 1; setTimeout(() => (loop._q = 0), 60000); }
+// Pull every queue dry. Re-entrancy guarded: a wake during a drain just flags a re-run.
+async function drainOnce(reason) {
+  if (draining) { drainAgain = true; return; }
+  draining = true;
+  try {
+    for (;;) { // phone-queued terminal tasks
+      let t = null;
+      try { const r = await fetch(RELAY + '/next', { headers }); if (r.ok) { const j = await r.json(); if (!j.empty) t = j; } }
+      catch (_) { break; }
+      if (!t) break;
+      await handle(t);
     }
-    pollChat(); // fire-and-forget; guarded by chatInFlight
-    pollSpawn(); // fire-and-forget; opens any queued real terminal agents
-    maybeReport(); // fire-and-forget; throttled RAM/CPU + live-tab reports (every 30s — keeps idle Durable-Object usage well under CF's 100k/day free tier)
-    pollSolveWatch(); // fire-and-forget; keeps Solve relays alive (throttled to 1/min)
-    pollSolveReap(); // fire-and-forget; closes superseded solve-relay tabs (throttled to ~12s)
-    await sleep(POLL_MS);
+    for (;;) { if (!(await pollSpawnOnce())) break; }                     // elevated terminal spawns (button / solve)
+    while (chatInFlight < MAX_CHAT) { if (!(await tryStartChat())) break; } // in-app chat turns
+  } finally {
+    draining = false;
+    if (drainAgain) { drainAgain = false; setTimeout(() => drainOnce('again'), 50); }
   }
 }
-loop();
+
+// Telemetry (RAM/CPU + live tabs) is pushed only when the dashboard nudges us, throttled so a
+// fast-polling dashboard can't spam it. When no one is watching, nothing is sent.
+let lastStatsPush = 0;
+function pushStats() {
+  const now = Date.now();
+  if (now - lastStatsPush < 2000) return;
+  lastStatsPush = now;
+  reportStats();    // fire-and-forget; RAM/CPU
+  reportExternal(); // fire-and-forget; other live Claude tabs
+}
+
+function startKeepalive() {
+  stopKeepalive();
+  // 'ping' is matched by the DO's auto-response pair, so it never wakes the DO or counts as a request.
+  keepalive = setInterval(() => { try { if (ws && ws.readyState === 1) ws.send('ping'); } catch (_) {} }, 30000);
+}
+function stopKeepalive() { if (keepalive) { clearInterval(keepalive); keepalive = null; } }
+
+function scheduleReconnect() {
+  if (ws && ws.readyState === 1) return;
+  const ms = wsBackoffMs;
+  wsBackoffMs = Math.min(wsBackoffMs * 2, 30000);
+  if (!scheduleReconnect._q) { log('WS down; reconnecting (backoff up to 30s)'); scheduleReconnect._q = 1; setTimeout(() => (scheduleReconnect._q = 0), 60000); }
+  setTimeout(connect, ms);
+}
+
+function connect() {
+  let sock;
+  try { sock = new WebSocket(WS_URL); }
+  catch (e) { log('WS construct failed: ' + e.message); return scheduleReconnect(); }
+  ws = sock;
+  sock.addEventListener('open', () => {
+    wsBackoffMs = 1000;
+    log('connected (push mode) -> ' + RELAY);
+    try { sock.send(JSON.stringify({ type: 'hello', host: os.hostname(), ts: Date.now() })); } catch (_) {}
+    drainOnce('connect'); // catch anything queued while we were disconnected
+    startKeepalive();
+  });
+  sock.addEventListener('message', (ev) => {
+    const data = typeof ev.data === 'string' ? ev.data : '';
+    if (data === 'pong') return;
+    let m = null; try { m = JSON.parse(data); } catch (_) { return; }
+    if (!m) return;
+    if (m.type === 'wake') drainOnce('wake');
+    else if (m.type === 'wantStats') pushStats();
+  });
+  sock.addEventListener('close', () => { stopKeepalive(); scheduleReconnect(); });
+  sock.addEventListener('error', () => { try { sock.close(); } catch (_) {} });
+}
+
+log('poller starting (push mode) -> ' + RELAY + ' (default cwd ' + DEFAULT_CWD + ')');
+connect();
+// Safety net: catch any missed wake + run the Solve watchdog every 5 min (the old loop's other duties).
+setInterval(() => { drainOnce('safety'); pollSolveWatch(); }, 5 * 60 * 1000);
+// Local-only cleanup of superseded Solve tabs — no network, no DO cost.
+setInterval(() => pollSolveReap(), 15000);
