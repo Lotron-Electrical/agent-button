@@ -329,6 +329,16 @@ async function pollSpawnOnce() {
             + 'dir that binds the scoped skills, so use ABSOLUTE paths to read and edit the project files there.\n') : '')
         + '\n';
       scopeInfo = ' [dispatch ' + (decision.mode || '?') + ' skills=' + scope.skills.length + ' mcp=' + scope.mcps.length + ']';
+      // Reap the scratch from two generations back. It is guaranteed dead by now (gen
+      // N-1 may still be closing), so this never pulls skills out from under a live
+      // session. cleanupScope unlinks the skill JUNCTIONS safely — never a raw rm -rf
+      // that could follow a junction into the real skill dir. Bounds scratch to ~2 live
+      // dirs per relay; the final gen of a finished relay is left behind (trivial).
+      const gm = /^(sv[0-9a-z]+)-g(\d+)$/i.exec(String(s.name));
+      if (gm) {
+        const old = parseInt(gm[2], 10) - 2;
+        if (old >= 1) { try { mod.cleanupScope(undefined, gm[1] + '-g' + old); } catch (_) {} }
+      }
     } catch (e) {
       log('solve dispatch scope failed for ' + s.name + ' (' + e.message + '); falling back to full inheritance');
     }
