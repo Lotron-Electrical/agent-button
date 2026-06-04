@@ -65,6 +65,15 @@ function toMsys(p) {
   if (m) return '/' + m[1].toLowerCase() + '/' + m[2].replace(/\\/g, '/');
   return p.replace(/\\/g, '/');
 }
+function toNode(p) {
+  // C:\Users\x or /c/Users/x -> C:/Users/x  (drive-lettered, forward slashes). claude is a
+  // Node program and reads "/c/Users/.." as drive-relative "C:\c\..", so its path flags
+  // (--mcp-config, --add-dir) need this form, not the MSYS one toMsys produces.
+  const s = String(p);
+  const m = /^\/([A-Za-z])\/(.*)$/.exec(s);
+  if (m) return m[1].toUpperCase() + ':/' + m[2];
+  return s.replace(/\\/g, '/');
+}
 function log(...a) {
   const line = '[' + new Date().toISOString() + '] ' + a.join(' ');
   console.log(line);
@@ -168,40 +177,68 @@ const TURN_TIMEOUT_MS = 15 * 60 * 1000; // kill a chat turn that runs longer tha
 let chatInFlight = 0;
 const bq = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'"; // single-quote for bash
 
-function runClaudeTurn(job) {
-  return new Promise((resolve) => {
-    let msgFile;
-    try {
-      msgFile = path.join(CHAT_DIR, 'msg-' + job.agentId + '-' + process.hrtime.bigint() + '.txt');
-      fs.writeFileSync(msgFile, String(job.message || ''));
-    } catch (e) { return resolve({ error: 'write failed: ' + e.message }); }
-    const cwdMsys = job.cwd && String(job.cwd).trim() ? toMsys(String(job.cwd).trim()) : DEFAULT_CWD;
-    const resume = job.sessionId ? ('--resume ' + bq(job.sessionId) + ' ') : '';
-    const cmd = 'cd ' + bq(cwdMsys) + ' && claude -p "$(cat ' + bq(toMsys(msgFile)) + ')" ' + resume +
-                '--output-format json --dangerously-skip-permissions';
-    let out = '', err = '', child, settled = false, timer = null;
-    const finish = (res) => {
-      if (settled) return; settled = true;
-      if (timer) clearTimeout(timer);
-      try { fs.unlinkSync(msgFile); } catch (_) {}
-      resolve(res);
-    };
-    try { child = spawn(BASH, ['-c', cmd], { env: SPAWN_ENV, stdio: ['ignore', 'pipe', 'pipe'] }); }
-    catch (e) { return finish({ error: 'spawn: ' + e.message }); }
-    timer = setTimeout(() => {
-      try { execSync('taskkill /PID ' + child.pid + ' /T /F', { stdio: 'ignore' }); } catch (_) {}
-      finish({ error: 'turn timed out after ' + Math.round(TURN_TIMEOUT_MS / 60000) + ' min and was killed' });
-    }, TURN_TIMEOUT_MS);
-    child.stdout.on('data', (d) => { out += d; });
-    child.stderr.on('data', (d) => { err += d; });
-    child.on('error', (e) => finish({ error: 'spawn: ' + e.message }));
-    child.on('close', (code) => {
-      let j = null; try { j = JSON.parse(out); } catch (_) {}
-      if (j && typeof j.result === 'string' && !j.is_error) finish({ reply: j.result, sessionId: j.session_id || job.sessionId });
-      else if (j && typeof j.result === 'string') finish({ error: 'agent: ' + j.result.slice(0, 400), sessionId: j.session_id || job.sessionId });
-      else finish({ error: (err.trim().slice(0, 300) || ('claude exited ' + code + ' with no JSON')) });
+// ---------- lean dispatch: each chat turn = deterministic search -> ONE scoped worker ----------
+// Replaces the old fat `claude -p` (which inherited every global skill + MCP server) with the
+// pipeline at ~/.claude/skills/dispatch: capindex search -> decide() -> a disposable worker scoped
+// to ONLY the chosen skill(s)/MCP, which tears itself down. dispatch.mjs is ESM, so this CommonJS
+// poller loads it lazily via dynamic import. DISPATCH_BASH must be set before that import because
+// scope_worker.mjs reads it at module-eval time to locate Git bash.
+const DISPATCH_DIR = path.join(os.homedir(), '.claude', 'skills', 'dispatch', 'scripts');
+const CHAT_MODEL = cfg.CHAT_MODEL || 'claude-sonnet-4-6'; // worker model for chat turns (fast + capable)
+let _dispatchPromise = null;
+function loadDispatch() {
+  if (!_dispatchPromise) {
+    process.env.DISPATCH_BASH = BASH;
+    const href = require('url').pathToFileURL(path.join(DISPATCH_DIR, 'dispatch.mjs')).href;
+    _dispatchPromise = import(href);
+  }
+  return _dispatchPromise;
+}
+
+// Compact transcript (last ~10 turns) for conversational continuity. Drops the trailing user turn:
+// that's the current message, passed separately as the task, so we don't duplicate it.
+function buildHistory(messages, max = 10) {
+  let msgs = Array.isArray(messages) ? messages.slice() : [];
+  if (msgs.length && msgs[msgs.length - 1].role === 'user') msgs = msgs.slice(0, -1);
+  return msgs.slice(-max).map((m) => {
+    const who = m.role === 'agent' ? 'assistant' : (m.role === 'system' ? 'system' : 'user');
+    return who + ': ' + String(m.text || '').slice(0, 1500);
+  }).join('\n');
+}
+
+// One chat turn as a lean dispatch. Returns {reply} or {error}. No sessionId: the worker is
+// disposable, continuity comes from the injected transcript (Option A), not --resume.
+async function runDispatchTurn(job) {
+  let history = '';
+  try {
+    const r = await fetch(RELAY + '/chat/get?id=' + encodeURIComponent(job.agentId), { headers });
+    if (r.ok) { const j = await r.json(); history = buildHistory(j.messages); }
+  } catch (_) {}
+  // The scoped worker runs in a scratch dir, so name the user's project so it can reach files there
+  // via absolute paths (it isn't confined to scratch; it just starts there for the scoping to bind).
+  const cwd = job.cwd && String(job.cwd).trim() ? String(job.cwd).trim() : '';
+  const ctx = cwd ? ('Working directory: ' + cwd + ' (use absolute paths to read or write files there).\n\n') : '';
+
+  let mod;
+  try { mod = await loadDispatch(); }
+  catch (e) { return { error: 'dispatch load failed: ' + e.message }; }
+  const workerName = 'chat-' + job.agentId + '-' + process.hrtime.bigint(); // disjoint scratch per turn
+  try {
+    const out = await mod.runDispatch({
+      message: String(job.message || ''),
+      history: ctx + history,
+      model: CHAT_MODEL,
+      workerName,
+      timeoutMs: TURN_TIMEOUT_MS, // the scoped worker tree-kills itself (taskkill /T) past this
+      env: SPAWN_ENV,
     });
-  });
+    const d = out.decision || {};
+    log('dispatch ' + job.agentId + ' mode=' + (d.mode || '?') + ' skills=[' + (d.skills || []).join(',') + '] mcps=[' + (d.mcps || []).join(',') + ']');
+    if (out.error) return { error: String(out.error).slice(0, 500) };
+    return { reply: out.reply };
+  } catch (e) {
+    return { error: 'dispatch error: ' + e.message };
+  }
 }
 
 // Pull one queued chat turn and run it (without blocking the drain). Returns true if a turn was
@@ -216,13 +253,14 @@ async function tryStartChat() {
   } catch (_) { return false; }
   if (!job) return false;
   chatInFlight++;
-  log('chat turn -> ' + job.agentId + (job.sessionId ? ' (resume)' : ' (new session)'));
+  log('chat turn -> ' + job.agentId + ' (dispatch)');
   (async () => {
-    const res = await runClaudeTurn(job);
+    const res = await runDispatchTurn(job);
     try {
       await fetch(RELAY + '/chat/result', {
         method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ agentId: job.agentId, sessionId: res.sessionId || job.sessionId, reply: res.reply, error: res.error })
+        // sessionId intentionally omitted: disposable scoped workers have no resumable session.
+        body: JSON.stringify({ agentId: job.agentId, reply: res.reply, error: res.error })
       });
     } catch (_) {}
     chatInFlight--;
@@ -247,7 +285,6 @@ async function pollSpawnOnce() {
     if (r.ok) { const j = await r.json(); if (!j.empty) s = j; }
   } catch (_) { return false; }
   if (!s) return false;
-  const cwdMsys = s.cwd && String(s.cwd).trim() ? toMsys(String(s.cwd).trim()) : DEFAULT_CWD;
   try { fs.mkdirSync(ADMIN_QUEUE, { recursive: true }); } catch (_) {}
   const promptFile = path.join(ADMIN_QUEUE, s.name + '.prompt.txt');
   const launcherFile = path.join(ADMIN_QUEUE, s.name + '.sh');
@@ -258,15 +295,55 @@ async function pollSpawnOnce() {
     '/c/Windows/System32', '/c/Windows', '/c/Program Files/nodejs',
     '/c/Users/' + user + '/.local/bin', '/c/Users/' + user + '/AppData/Roaming/npm'
   ].join(':');
+
+  // Default: a full-inheritance interactive tab opened in the project dir.
+  let cwdArg = s.cwd && String(s.cwd).trim() ? toMsys(String(s.cwd).trim()) : DEFAULT_CWD;
+  let scopeArgs = '';      // extra claude scope flags, appended through claude-tab.sh
+  let promptPrefix = '';   // scoped-run note prepended to the prompt
+  let scopeInfo = '';      // log suffix
+
+  // Solve+Dispatch (or a dispatch-toggled single spawn): scope THIS generation to only the
+  // capabilities its goal needs. The search + scratch must be built here on the PC (the
+  // Cloudflare Worker can't run fastembed). It launches the SAME watchable tab, just pointed
+  // at the scratch with strict scope flags so only the chosen skills/MCP load. Any failure
+  // falls back to the fat launch below, so a never-give-up relay never dies on a scope hiccup.
+  if (s.dispatch && s.goal) {
+    try {
+      const mod = await loadDispatch();
+      const { scope, decision } = await mod.prepareDispatchScope({ goal: String(s.goal), workerName: s.name });
+      cwdArg = toMsys(scope.cwd);
+      if (scope.mcpConfigPath) {
+        scopeArgs += ' --mcp-config ' + bq(scope.mcpConfigPath);
+        if (scope.strict) scopeArgs += ' --strict-mcp-config';
+      }
+      if (scope.settingSources) scopeArgs += ' --setting-sources ' + bq(scope.settingSources);
+      const projNode = s.cwd && String(s.cwd).trim() ? toNode(String(s.cwd).trim()) : '';
+      if (projNode) scopeArgs += ' --add-dir ' + bq(projNode);
+      promptPrefix =
+        '[SCOPED RUN] You are running in a disposable scratch sandbox, scoped by lean dispatch to only '
+        + 'the capabilities this problem needs'
+        + (scope.skills.length ? ' (skills: ' + scope.skills.join(', ') + ')' : ' (no extra skills matched)')
+        + (scope.mcps.length ? ' (MCP: ' + scope.mcps.join(', ') + ')' : '')
+        + '.\n'
+        + (projNode ? ('The project to work on lives at ' + projNode + '. Your working directory is a scratch '
+            + 'dir that binds the scoped skills, so use ABSOLUTE paths to read and edit the project files there.\n') : '')
+        + '\n';
+      scopeInfo = ' [dispatch ' + (decision.mode || '?') + ' skills=' + scope.skills.length + ' mcp=' + scope.mcps.length + ']';
+    } catch (e) {
+      log('solve dispatch scope failed for ' + s.name + ' (' + e.message + '); falling back to full inheritance');
+    }
+  }
+
   const launcher =
     'export PATH="' + pathDirs + ':$PATH"\n' +
     bq(CLAUDE_TAB) + ' --title ' + bq(s.name) + ' --remote-control ' + bq(s.name) +
-    ' --cwd ' + bq(cwdMsys) + ' --no-auto-close --prompt "$(cat ' + bq(toMsys(promptFile)) + ')"\n';
+    ' --cwd ' + bq(cwdArg) + ' --no-auto-close' + scopeArgs +
+    ' --prompt "$(cat ' + bq(toMsys(promptFile)) + ')"\n';
   try {
-    fs.writeFileSync(promptFile, String(s.prompt || ''));
+    fs.writeFileSync(promptFile, promptPrefix + String(s.prompt || ''));
     fs.writeFileSync(launcherFile, launcher);
   } catch (e) { log('admin spawn write failed ' + s.name + ': ' + e.message); return true; }
-  log('admin spawn -> ' + s.name + ' (queued; triggering ClaudeCodeAdmin task)');
+  log('admin spawn -> ' + s.name + ' (queued; triggering ClaudeCodeAdmin task)' + scopeInfo);
   try { execSync('schtasks /run /tn ClaudeCodeAdmin', { stdio: 'ignore', timeout: 12000 }); }
   catch (e) { log('schtasks trigger failed for ' + s.name + ': ' + e.message); }
   return true;

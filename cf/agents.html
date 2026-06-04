@@ -123,7 +123,7 @@ function renderExternal(external){
 function renderSolves(solves){
   if(!solves || !solves.length){ $('solveswrap').innerHTML=''; return; }
   $('solveswrap').innerHTML = '<div class="seclabel" style="margin-top:4px;border-top:none;padding-top:0">Solve relays · never give up</div>' + solves.map(s=>{
-    const gen = '∞ generation '+(s.generation||1);
+    const gen = (s.dispatch?'⚡ lean · ':'')+'∞ generation '+(s.generation||1);
     let st, line, actions='';
     if(s.status==='solved'){ st={label:'solved',cls:'idle'}; line=gen+(s.summary?' · '+s.summary:''); }
     else if(s.status==='stopped'){ st={label:'stopped',cls:'other'}; line=gen+' · stopped'; actions='<button class="srelay cont" data-id="'+esc(s.id)+'">Resume ›</button>'; }

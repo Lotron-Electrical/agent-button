@@ -455,7 +455,7 @@ export class QueueDO {
         ? (task + '\n\nWork autonomously and keep going until this is fully solved and verified. Do not stop or wait for further input until it is done.')
         : task;
       const spawns = (await this.storage.get('spawns')) || [];
-      spawns.push({ name, prompt, cwd: String(b.cwd || ''), ts: Date.now() });
+      spawns.push({ name, prompt, cwd: String(b.cwd || ''), dispatch: !!b.dispatch, goal: task, ts: Date.now() });
       await this.storage.put('spawns', spawns.slice(-20));
       this.wake('spawn');
       return json({ ok: true, name });
@@ -477,10 +477,10 @@ export class QueueDO {
       const now = Date.now();
       const cwd = String(b.cwd || '');
       const solves = (await this.storage.get('solves')) || [];
-      solves.unshift({ id: solveId, title: goal.split('\n')[0].slice(0, 70), goal: goal.slice(0, 600), cwd, status: 'solving', generation: 1, createdAt: now, lastActivity: now, lastBeat: now, beatSinceSpawn: false, deadSpawns: 0, autoContinues: 0 });
+      solves.unshift({ id: solveId, title: goal.split('\n')[0].slice(0, 70), goal: goal.slice(0, 600), cwd, dispatch: !!b.dispatch, status: 'solving', generation: 1, createdAt: now, lastActivity: now, lastBeat: now, beatSinceSpawn: false, deadSpawns: 0, autoContinues: 0 });
       await this.storage.put('solves', solves.slice(0, 30));
       const spawns = (await this.storage.get('spawns')) || [];
-      spawns.push({ name: solveId + '-g1', prompt: buildSolvePrompt(goal, 1, solveId, b.relay || '', this.env.BUTTON_TOKEN, true), cwd, ts: now });
+      spawns.push({ name: solveId + '-g1', prompt: buildSolvePrompt(goal, 1, solveId, b.relay || '', this.env.BUTTON_TOKEN, true), cwd, dispatch: !!b.dispatch, goal: goal.slice(0, 600), ts: now });
       await this.storage.put('spawns', spawns.slice(-20));
       this.wake('solve');
       return json({ ok: true, id: solveId });
@@ -500,7 +500,7 @@ export class QueueDO {
       sv.lastBeat = now; sv.beatSinceSpawn = false; sv.deadSpawns = 0; delete sv.awaiting;
       await this.storage.put('solves', solves);
       const spawns = (await this.storage.get('spawns')) || [];
-      spawns.push({ name: sv.id + '-g' + sv.generation, prompt: buildSolvePrompt(sv.goal, sv.generation, sv.id, b.relay || '', this.env.BUTTON_TOKEN, false), cwd: sv.cwd, ts: now });
+      spawns.push({ name: sv.id + '-g' + sv.generation, prompt: buildSolvePrompt(sv.goal, sv.generation, sv.id, b.relay || '', this.env.BUTTON_TOKEN, false), cwd: sv.cwd, dispatch: !!sv.dispatch, goal: sv.goal, ts: now });
       await this.storage.put('spawns', spawns.slice(-20));
       this.wake('solve');
       return json({ ok: true, generation: sv.generation });
@@ -538,7 +538,7 @@ export class QueueDO {
       sv.lastBeat = now; sv.beatSinceSpawn = false; sv.deadSpawns = 0; delete sv.awaiting;
       await this.storage.put('solves', solves);
       const spawns = (await this.storage.get('spawns')) || [];
-      spawns.push({ name: sv.id + '-g' + sv.generation, prompt: buildSolvePrompt(sv.goal, sv.generation, sv.id, b.relay || '', this.env.BUTTON_TOKEN, false), cwd: sv.cwd, ts: now });
+      spawns.push({ name: sv.id + '-g' + sv.generation, prompt: buildSolvePrompt(sv.goal, sv.generation, sv.id, b.relay || '', this.env.BUTTON_TOKEN, false), cwd: sv.cwd, dispatch: !!sv.dispatch, goal: sv.goal, ts: now });
       await this.storage.put('spawns', spawns.slice(-20));
       this.wake('solve');
       return json({ ok: true, generation: sv.generation });
@@ -573,7 +573,7 @@ export class QueueDO {
         sv.generation = (sv.generation || 1) + 1;
         sv.lastActivity = now; sv.lastBeat = now; sv.beatSinceSpawn = false;
         sv.autoContinues = (sv.autoContinues || 0) + 1;
-        spawns.push({ name: sv.id + '-g' + sv.generation, prompt: buildSolvePrompt(sv.goal, sv.generation, sv.id, relay, this.env.BUTTON_TOKEN, false), cwd: sv.cwd, ts: now });
+        spawns.push({ name: sv.id + '-g' + sv.generation, prompt: buildSolvePrompt(sv.goal, sv.generation, sv.id, relay, this.env.BUTTON_TOKEN, false), cwd: sv.cwd, dispatch: !!sv.dispatch, goal: sv.goal, ts: now });
         respawned.push(sv.id + '-g' + sv.generation); changed = true;
       }
       if (changed) { await this.storage.put('solves', solves); await this.storage.put('spawns', spawns.slice(-20)); }

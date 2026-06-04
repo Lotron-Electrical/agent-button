@@ -83,6 +83,7 @@
   </details>
 
   <label class="endless" for="solve"><input id="solve" type="checkbox" /><span><b>Solve mode</b><br><small>never gives up — spawns a fresh successor if it gets stuck, until solved</small></span></label>
+  <label class="endless" for="dispatch"><input id="dispatch" type="checkbox" /><span><b>Lean dispatch</b><br><small>scope the agent to only the skills + MCP this task needs (stacks with Solve)</small></span></label>
 
   <div class="spacer"></div>
 
@@ -103,9 +104,10 @@ async function start(){
   if (!task){ setStatus('Type a task first','err'); $('task').focus(); return; }
   const cwd = $('cwd').value.trim();
   const solve = $('solve').checked;
-  $('go').disabled = true; haptic(20); setStatus(solve?'Starting Solve relay on your PC…':'Opening a terminal on your PC…','go');
+  const dispatch = $('dispatch').checked;
+  $('go').disabled = true; haptic(20); setStatus(solve?(dispatch?'Starting a lean Solve relay…':'Starting Solve relay on your PC…'):(dispatch?'Opening a lean scoped terminal…':'Opening a terminal on your PC…'),'go');
   try{
-    const r = await api(solve ? '/solve/new' : '/spawn', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(solve ? { goal: task, cwd } : { task, cwd }) });
+    const r = await api(solve ? '/solve/new' : '/spawn', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(solve ? { goal: task, cwd, dispatch } : { task, cwd, dispatch }) });
     if (!r.ok) throw new Error('relay '+r.status);
     haptic([15,40,15]);
     setStatus(solve?'Solve relay started · it keeps going until solved':'Terminal opening · appears in Agents with its chat link','ok');
