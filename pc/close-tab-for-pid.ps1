@@ -44,6 +44,13 @@ if ($DryRun) {
   exit 0
 }
 
-taskkill /PID $($tabRoot.ProcessId) /T /F | Out-Null
-Write-Output "closed tab-root pid $($tabRoot.ProcessId) ($($tabRoot.Name)) for pid $TargetPid"
-exit 0
+taskkill /PID $($tabRoot.ProcessId) /T /F 2>$null | Out-Null
+if ($LASTEXITCODE -eq 0) {
+  Write-Output "closed tab-root pid $($tabRoot.ProcessId) ($($tabRoot.Name)) for pid $TargetPid"
+  exit 0
+}
+# taskkill failed — most commonly exit 1 = Access Denied, which is what happens when a
+# medium-integrity caller (the non-elevated poller) tries to kill an ELEVATED tab. Report
+# it honestly instead of the old `| Out-Null` that swallowed the error and printed "closed".
+Write-Output "FAILED to close tab-root pid $($tabRoot.ProcessId) ($($tabRoot.Name)) for pid $TargetPid (taskkill exit $LASTEXITCODE; exit 1=access-denied/not-elevated, 128=already-gone)"
+exit 1
