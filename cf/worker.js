@@ -446,9 +446,20 @@ export class QueueDO {
 
     // ---- terminal-agent spawn queue (real interactive Claude Code windows) ----
     if (op === 'spawnnew') {
-      const b = await request.json(); // {task, cwd, endless}
+      const b = await request.json(); // {task, cwd, endless, reqId}
       const task = String(b.task || '').trim();
       if (!task) return json({ error: 'task required' }, 400);
+      // Idempotency. Starting an agent is not a safe operation to run twice, and the phone is on
+      // mobile data: a request that reaches us but whose response is lost looks identical to a
+      // failure, so the user presses START again and gets a second agent (observed 2026-07-10).
+      // The client sends a reqId that is stable across its retries of the same press, so a repeat
+      // returns the original spawn instead of queueing another.
+      const reqId = String(b.reqId || '').slice(0, 64);
+      const keys = (await this.storage.get('spawnkeys')) || [];
+      if (reqId) {
+        const hit = keys.find((k) => k.k === reqId && Date.now() - k.ts < 15 * 60 * 1000);
+        if (hit) return json({ ok: true, name: hit.name, duplicate: true });
+      }
       const slug = (task.split('\n')[0].toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 22)) || 'agent';
       const name = 'ag-' + slug + '-' + crypto.randomUUID().replace(/-/g, '').slice(0, 4);
       const prompt = b.endless
@@ -457,6 +468,10 @@ export class QueueDO {
       const spawns = (await this.storage.get('spawns')) || [];
       spawns.push({ name, prompt, cwd: String(b.cwd || ''), dispatch: !!b.dispatch, goal: task, ts: Date.now() });
       await this.storage.put('spawns', spawns.slice(-20));
+      if (reqId) {
+        keys.push({ k: reqId, name, ts: Date.now() });
+        await this.storage.put('spawnkeys', keys.slice(-40));
+      }
       this.wake('spawn');
       return json({ ok: true, name });
     }
@@ -470,9 +485,17 @@ export class QueueDO {
 
     // ---- Solve mode (relay of never-give-up agents) ----
     if (op === 'solvenew') {
-      const b = await request.json(); // {goal, cwd, relay}
+      const b = await request.json(); // {goal, cwd, relay, reqId}
       const goal = String(b.goal || '').trim();
       if (!goal) return json({ error: 'goal required' }, 400);
+      // Same idempotency guard as spawnnew, and it matters more here: a duplicate Solve is two
+      // never-give-up relays grinding the same goal forever, each spawning its own generations.
+      const reqId = String(b.reqId || '').slice(0, 64);
+      const keys = (await this.storage.get('spawnkeys')) || [];
+      if (reqId) {
+        const hit = keys.find((k) => k.k === reqId && Date.now() - k.ts < 15 * 60 * 1000);
+        if (hit) return json({ ok: true, id: hit.name, duplicate: true });
+      }
       const solveId = 'sv' + crypto.randomUUID().replace(/-/g, '').slice(0, 6);
       const now = Date.now();
       const cwd = String(b.cwd || '');
@@ -482,6 +505,10 @@ export class QueueDO {
       const spawns = (await this.storage.get('spawns')) || [];
       spawns.push({ name: solveId + '-g1', prompt: buildSolvePrompt(goal, 1, solveId, b.relay || '', this.env.BUTTON_TOKEN, true), cwd, dispatch: !!b.dispatch, goal: goal.slice(0, 600), ts: now });
       await this.storage.put('spawns', spawns.slice(-20));
+      if (reqId) {
+        keys.push({ k: reqId, name: solveId, ts: now });
+        await this.storage.put('spawnkeys', keys.slice(-40));
+      }
       this.wake('solve');
       return json({ ok: true, id: solveId });
     }

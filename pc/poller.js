@@ -81,6 +81,48 @@ function log(...a) {
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Base dir for dispatch scratch (mirrors scope_worker.mjs DEFAULT_RUNDIR so the paths
+// we compute here line up with what cleanupScope/sweepStaleScratch actually delete).
+const DISPATCH_RUNDIR = path.join(os.homedir(), '.dispatch-runs');
+
+// Canonicalize a path for cross-form comparison: C:\X, C:/X and /c/X all collapse to
+// "c:/x" (lowercase drive + path, forward slashes, no trailing slash). Live-session
+// cwds and scratch paths can be recorded in any of those forms.
+function canonPath(p) {
+  let s = String(p || '').replace(/\\/g, '/');
+  const msys = /^\/([A-Za-z])\/(.*)$/.exec(s); // /c/Users/x -> C:/Users/x
+  if (msys) s = msys[1] + ':/' + msys[2];
+  return s.replace(/\/+$/, '').toLowerCase();
+}
+
+// Canon set of cwds for every LIVE Claude session (alive pid) from ~/.claude/sessions.
+// A dispatch scratch dir that one of these sits inside is in active use and must not be
+// swept or reaped. (alivePid is a hoisted function declaration defined further down.)
+function liveSessionCwds() {
+  const out = new Set();
+  const dir = path.join(os.homedir(), '.claude', 'sessions');
+  let files = [];
+  try { files = fs.readdirSync(dir).filter((f) => f.endsWith('.json')); } catch (_) { return out; }
+  for (const f of files) {
+    let d;
+    try { d = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')); } catch (_) { continue; }
+    if (!d || !d.pid || !alivePid(d.pid) || !d.cwd) continue;
+    out.add(canonPath(d.cwd));
+  }
+  return out;
+}
+
+// True if scratchPath is the cwd of (or an ancestor of) any live session, i.e. a session
+// is still working inside it, so tearing it down would yank scope from a live tab.
+function scratchInUse(scratchPath, cwds = liveSessionCwds()) {
+  const norm = canonPath(scratchPath);
+  if (!norm) return false;
+  for (const c of cwds) {
+    if (c === norm || c.startsWith(norm + '/')) return true;
+  }
+  return false;
+}
+
 function buildPrompt(task, i, count, id, cwd) {
   const lane = count > 1
     ? `You are agent ${i} of ${count} spawned together for this same task. Peers are working in parallel — if the task is splittable, take a distinct slice based on your number.\n`
@@ -246,13 +288,13 @@ async function runDispatchTurn(job) {
 // backlog drains without busy-looping.
 async function tryStartChat() {
   if (chatInFlight >= MAX_CHAT) return false;
+  chatInFlight++; // claim the slot BEFORE any await so concurrent finishers can't overshoot MAX_CHAT (TOCTOU)
   let job = null;
   try {
     const r = await fetch(RELAY + '/chat/jobnext', { headers });
     if (r.ok) { const j = await r.json(); if (!j.empty) job = j; }
-  } catch (_) { return false; }
-  if (!job) return false;
-  chatInFlight++;
+  } catch (_) { chatInFlight--; return false; }
+  if (!job) { chatInFlight--; return false; }
   log('chat turn -> ' + job.agentId + ' (dispatch)');
   (async () => {
     const res = await runDispatchTurn(job);
@@ -329,15 +371,25 @@ async function pollSpawnOnce() {
             + 'dir that binds the scoped skills, so use ABSOLUTE paths to read and edit the project files there.\n') : '')
         + '\n';
       scopeInfo = ' [dispatch ' + (decision.mode || '?') + ' skills=' + scope.skills.length + ' mcp=' + scope.mcps.length + ']';
-      // Reap the scratch from two generations back. It is guaranteed dead by now (gen
-      // N-1 may still be closing), so this never pulls skills out from under a live
-      // session. cleanupScope unlinks the skill JUNCTIONS safely — never a raw rm -rf
-      // that could follow a junction into the real skill dir. Bounds scratch to ~2 live
-      // dirs per relay; the final gen of a finished relay is left behind (trivial).
+      // Reap the scratch from two generations back. Gen N-2 is normally dead by the time
+      // gen N spawns, but a slow solver can leave 3 generations overlapping, so we guard
+      // with scratchInUse (skip if a live session is still cwd'd inside it) instead of
+      // assuming it's dead. cleanupScope routes through Node rmSync(recursive, force),
+      // which UNLINKS junctions rather than following them (a shell rm -rf could follow a
+      // junction into the real skill dir, but that path is never used). The final gen of a
+      // finished relay is left for the time-based pollDispatchSweep to collect.
       const gm = /^(sv[0-9a-z]+)-g(\d+)$/i.exec(String(s.name));
       if (gm) {
         const old = parseInt(gm[2], 10) - 2;
-        if (old >= 1) { try { mod.cleanupScope(undefined, gm[1] + '-g' + old); } catch (_) {} }
+        if (old >= 1) {
+          const victimName = gm[1] + '-g' + old;
+          const victimPath = path.join(DISPATCH_RUNDIR, 'workers', victimName);
+          if (scratchInUse(victimPath)) {
+            log('solve reap: skipped live gen ' + victimName + ' (still a live session cwd)');
+          } else {
+            try { mod.cleanupScope(undefined, victimName); } catch (_) {}
+          }
+        }
       }
     } catch (e) {
       log('solve dispatch scope failed for ' + s.name + ' (' + e.message + '); falling back to full inheritance');
@@ -478,6 +530,25 @@ function pollSolveReap() {
   finally { reapBusy = false; }
 }
 
+// ---------- Dispatch scratch sweep ----------
+// Time-based backstop for LEAKED dispatch scratch dirs under ~/.dispatch-runs/workers/.
+// The N-2 reaper above only matches relay (sv<id>-g<N>) names, so non-relay chat/dispatch
+// spawns and the final 1-2 gens of every relay are never reaped; a leaked mcp-config.json
+// also holds real MCP creds. sweepStaleScratch removes anything older than its default age
+// UNLESS a live session is still cwd'd inside it. Throttled to once every 30 min.
+let sweepBusy = false, lastSweep = 0;
+async function pollDispatchSweep() {
+  const now = Date.now();
+  if (sweepBusy || now - lastSweep < 30 * 60 * 1000) return;
+  sweepBusy = true; lastSweep = now;
+  try {
+    const mod = await loadDispatch();
+    const cwds = liveSessionCwds();
+    mod.sweepStaleScratch({ runDir: DISPATCH_RUNDIR, isProtected: (name, p) => scratchInUse(p, cwds), log });
+  } catch (e) { log('dispatch sweep error: ' + e.message); }
+  finally { sweepBusy = false; }
+}
+
 async function handle(t) {
   const id = t.id;
   const count = Math.max(1, Math.min(4, t.count || 1));
@@ -519,7 +590,16 @@ async function ack(id, spawned, error) {
 // Solve watchdog rides along on it. Telemetry is sent only when the dashboard asks.
 // ============================================================================
 const WS_URL = RELAY.replace(/^http/, 'ws') + '/ws?s=' + encodeURIComponent(TOKEN);
-let ws = null, wsBackoffMs = 1000, keepalive = null;
+// Liveness. The 'ping' we send is auto-answered at the edge, so an arriving 'pong' is proof the
+// socket still carries traffic in both directions. Nothing used to READ that pong: a half-open
+// TCP (phone/NAT/Wi-Fi drop) leaves readyState===1 forever while the DO's wake pushes fall into
+// the void, and Node's built-in WebSocket has no keepalive of its own to notice. A spawn then sat
+// in the queue until the 5-minute safety drain happened to run. Observed 2026-07-10: a button
+// press waited ~2 min for an accidental reconnect, and the log shows the socket dropping a dozen
+// times a day. So: treat pong silence as a dead socket and force a reconnect, which drains on open.
+const PING_MS = parseInt(cfg.PING_MS, 10) || 15000;
+const PONG_TIMEOUT_MS = parseInt(cfg.PONG_TIMEOUT_MS, 10) || 45000;
+let ws = null, wsBackoffMs = 1000, keepalive = null, lastPong = 0, reconnectTimer = null;
 let draining = false, drainAgain = false;
 
 // Pull every queue dry. Re-entrancy guarded: a wake during a drain just flags a re-run.
@@ -553,19 +633,36 @@ function pushStats() {
   reportExternal(); // fire-and-forget; other live Claude tabs
 }
 
-function startKeepalive() {
+function startKeepalive(sock) {
   stopKeepalive();
-  // 'ping' is matched by the DO's auto-response pair, so it never wakes the DO or counts as a request.
-  keepalive = setInterval(() => { try { if (ws && ws.readyState === 1) ws.send('ping'); } catch (_) {} }, 30000);
+  // 'ping' is matched by the DO's auto-response pair, so it never wakes the DO or counts as a
+  // request — pinging often is free. If the matching pong stops coming back, this socket is dead
+  // regardless of what readyState claims; close it so the 'close' handler reconnects and re-drains.
+  keepalive = setInterval(() => {
+    if (ws !== sock || sock.readyState !== 1) return;   // superseded or already closing
+    const silent = Date.now() - lastPong;
+    if (silent > PONG_TIMEOUT_MS) {
+      log('WS stale (no pong for ' + Math.round(silent / 1000) + 's); forcing reconnect');
+      stopKeepalive();
+      try { sock.close(); } catch (_) {}
+      scheduleReconnect(); // don't rely on 'close' firing promptly on a half-open socket
+      return;
+    }
+    try { sock.send('ping'); } catch (_) {}
+  }, PING_MS);
 }
 function stopKeepalive() { if (keepalive) { clearInterval(keepalive); keepalive = null; } }
 
 function scheduleReconnect() {
   if (ws && ws.readyState === 1) return;
+  // Idempotent: a forced close from the keepalive AND the socket's own 'close' event both land
+  // here, and a stale socket's late 'error' can add a third. Without this guard each would queue
+  // its own connect() and we'd fan out into several live sockets.
+  if (reconnectTimer) return;
   const ms = wsBackoffMs;
   wsBackoffMs = Math.min(wsBackoffMs * 2, 30000);
   if (!scheduleReconnect._q) { log('WS down; reconnecting (backoff up to 30s)'); scheduleReconnect._q = 1; setTimeout(() => (scheduleReconnect._q = 0), 60000); }
-  setTimeout(connect, ms);
+  reconnectTimer = setTimeout(() => { reconnectTimer = null; connect(); }, ms);
 }
 
 function connect() {
@@ -575,12 +672,14 @@ function connect() {
   ws = sock;
   sock.addEventListener('open', () => {
     wsBackoffMs = 1000;
+    lastPong = Date.now(); // a fresh socket starts its liveness window now
     log('connected (push mode) -> ' + RELAY);
     try { sock.send(JSON.stringify({ type: 'hello', host: os.hostname(), ts: Date.now() })); } catch (_) {}
     drainOnce('connect'); // catch anything queued while we were disconnected
-    startKeepalive();
+    startKeepalive(sock);
   });
   sock.addEventListener('message', (ev) => {
+    lastPong = Date.now(); // any inbound frame, not just a pong, proves the socket still carries traffic
     const data = typeof ev.data === 'string' ? ev.data : '';
     if (data === 'pong') return;
     let m = null; try { m = JSON.parse(data); } catch (_) { return; }
@@ -594,7 +693,13 @@ function connect() {
 
 log('poller starting (push mode) -> ' + RELAY + ' (default cwd ' + DEFAULT_CWD + ')');
 connect();
-// Safety net: catch any missed wake + run the Solve watchdog every 5 min (the old loop's other duties).
-setInterval(() => { drainOnce('safety'); pollSolveWatch(); }, 5 * 60 * 1000);
+// Safety net for a wake that never lands. This is the hard ceiling on "I pressed START and
+// nothing happened", so it is deliberately much tighter than the Solve watchdog it used to ride
+// on: an idle drain is 3 Durable Object requests (/next, /spawn-next, /chat/jobnext), so 90s
+// costs ~2.9k/day against the 100k/day free tier — the pong watchdog above should mean we almost
+// never need it. Re-check that budget before tightening further (see COST GOTCHA in the notes).
+setInterval(() => drainOnce('safety'), 90 * 1000);
+// The Solve watchdog and scratch sweep stay on the slow cadence; neither is latency-sensitive.
+setInterval(() => { pollSolveWatch(); pollDispatchSweep(); }, 5 * 60 * 1000);
 // Local-only cleanup of superseded Solve tabs — no network, no DO cost.
 setInterval(() => pollSolveReap(), 15000);

@@ -34,20 +34,69 @@ $beforeHandles = [WinEnum]::GetWTHandles()
 
 # agent-button spawn queue: if a spawn is pending, run its launcher (this wrapper already runs
 # at Highest, so the window is truly elevated); otherwise open a blank admin session for manual use.
+#
+# The task is registered MultipleInstances=Parallel and the poller fires one trigger per queued
+# spawn, so several copies of this script can be running at once. Picking a launcher by listing
+# the queue and then using the result is a check-then-use race: two instances both select the
+# oldest file, both run it, and the second launcher is never claimed (observed 2026-07-10 — one
+# button press produced two identical agents plus one orphaned launcher).
+#
+# Claiming is therefore an exclusive create of a <name>.claim marker. FileMode::CreateNew maps to
+# NTFS FILE_CREATE, which fails if the name already exists, so exactly one instance can win a
+# given launcher and the losers fall through to the next one. Do NOT "claim" by renaming the
+# launcher instead: File::Move is not exclusive here — measured on this box, two processes racing
+# 400 renames both reported success on 61 of them, which is precisely the duplicate-agent bug.
 $adminQueue = "C:\Users\Lloyd Gibbs\.agent-button-spawns\admin-queue"
+$claimDir = Join-Path $adminQueue 'claimed'
 $bashExe = "C:\Program Files\Git\bin\bash.exe"
-$pending = $null
+$pending = $null       # the launcher this instance claimed (still in the queue dir)
+$promptSrc = $null     # its prompt file — the launcher cats it by absolute path
+$sawCandidate = $false # a launcher was there, even if a sibling instance won the race for it
 if (Test-Path $adminQueue) {
-    $pending = Get-ChildItem -Path $adminQueue -Filter '*.sh' -File -ErrorAction SilentlyContinue |
-        Where-Object { ((Get-Date) - $_.LastWriteTime).TotalMinutes -lt 5 } |
-        Sort-Object LastWriteTime | Select-Object -First 1
+    if (-not (Test-Path $claimDir)) { New-Item -ItemType Directory -Path $claimDir -Force | Out-Null }
+
+    # A launcher past the 5-minute freshness window can never run again, and a marker left behind
+    # by a crashed instance would block its launcher's name forever. Collect both.
+    Get-ChildItem -Path $adminQueue -File -ErrorAction SilentlyContinue |
+        Where-Object { ($_.Name -like '*.sh' -or $_.Name -like '*.prompt.txt') -and ((Get-Date) - $_.LastWriteTime).TotalMinutes -gt 60 } |
+        ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue }
+    Get-ChildItem -Path $claimDir -File -ErrorAction SilentlyContinue |
+        Where-Object { ((Get-Date) - $_.LastWriteTime).TotalMinutes -gt 60 } |
+        ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue }
+
+    $cands = @(Get-ChildItem -Path $adminQueue -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -like '*.sh' -and ((Get-Date) - $_.LastWriteTime).TotalMinutes -lt 5 } |
+        Sort-Object LastWriteTime)
+    $sawCandidate = ($cands.Count -gt 0)
+    foreach ($c in $cands) {
+        try {
+            $h = [System.IO.File]::Open((Join-Path $claimDir ($c.Name + '.claim')),
+                 [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+            $h.Close()
+        } catch { continue }   # a sibling instance owns this launcher
+        $pending = $c
+        $promptSrc = Join-Path $adminQueue ($c.BaseName + '.prompt.txt')
+        break
+    }
+}
+if (-not $pending) {
+    # Two ways to arrive here with nothing to run, and only one of them wants a blank window.
+    # $sawCandidate means a sibling won every launcher we saw. But a sibling that claims BETWEEN
+    # our scan and its own claim leaves us seeing an empty queue instead, so an empty queue alone
+    # does not prove this was a manual launch: a marker written seconds ago means a spawn just
+    # happened and we are a surplus trigger. Only a genuinely quiet queue opens a blank session.
+    $justClaimed = @(Get-ChildItem -Path $claimDir -File -ErrorAction SilentlyContinue |
+        Where-Object { ((Get-Date) - $_.LastWriteTime).TotalSeconds -lt 20 }).Count -gt 0
+    if ($sawCandidate -or $justClaimed) { exit 0 }
 }
 if ($pending -and (Test-Path $bashExe)) {
     $lm = $pending.FullName
     $launcherMsys = '/' + $lm.Substring(0, 1).ToLower() + ($lm.Substring(2) -replace '\\', '/')
     & $bashExe $launcherMsys 2>$null
+    # Launcher and prompt have both been consumed by now; the .claim marker stays behind so a
+    # concurrent scan can't re-run this launcher, and the age purge above collects it later.
     Remove-Item -LiteralPath $pending.FullName -Force -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath ($pending.FullName -replace '\.sh$', '.prompt.txt') -Force -ErrorAction SilentlyContinue
+    if ($promptSrc) { Remove-Item -LiteralPath $promptSrc -Force -ErrorAction SilentlyContinue }
 
     # --- Solve-relay generation reap (runs ELEVATED here) ---
     # A Solve relay spawns one tab per generation (sv<id>-g<N>). On each hand-off the

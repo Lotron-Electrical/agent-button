@@ -99,22 +99,43 @@ function haptic(ms){ try{ navigator.vibrate && navigator.vibrate(ms); }catch(e){
 function api(p, opts={}){ return fetch(p, { ...opts, headers:{ 'Authorization':'Bearer '+SECRET, ...(opts.headers||{}) } }); }
 function setStatus(t,c){ const e=$('status'); e.className='status '+(c||''); e.innerHTML=(c==='go'?'<div class="spin"></div>':'')+t; }
 
+// Idempotency key for this press. On mobile data a request can reach the relay while its
+// response is lost, which is indistinguishable from a failure — so a retry (ours below, or the
+// user pressing START again) must not queue a second agent. The relay dedupes on this id, so it
+// has to survive retries and only reset once a spawn actually succeeds, or the task changes.
+let reqId = null;
+const newReqId = () => (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random().toString(16).slice(2));
+
 async function start(){
   const task = $('task').value.trim();
   if (!task){ setStatus('Type a task first','err'); $('task').focus(); return; }
   const cwd = $('cwd').value.trim();
   const solve = $('solve').checked;
   const dispatch = $('dispatch').checked;
+  if (!reqId) reqId = newReqId();
   $('go').disabled = true; haptic(20); setStatus(solve?(dispatch?'Starting a lean Solve relay…':'Starting Solve relay on your PC…'):(dispatch?'Opening a lean scoped terminal…':'Opening a terminal on your PC…'),'go');
+  const path = solve ? '/solve/new' : '/spawn';
+  const body = JSON.stringify(solve ? { goal: task, cwd, dispatch, reqId } : { task, cwd, dispatch, reqId });
   try{
-    const r = await api(solve ? '/solve/new' : '/spawn', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(solve ? { goal: task, cwd, dispatch } : { task, cwd, dispatch }) });
+    let r;
+    try {
+      r = await api(path, { method:'POST', headers:{'Content-Type':'application/json'}, body });
+    } catch(netErr) {
+      // Dropped connection, not a rejection. Retrying is safe now that reqId dedupes it.
+      setStatus('Connection dropped · retrying…','go');
+      await new Promise(res => setTimeout(res, 1500));
+      r = await api(path, { method:'POST', headers:{'Content-Type':'application/json'}, body });
+    }
     if (!r.ok) throw new Error('relay '+r.status);
+    reqId = null; // this press is spent; the next one is a new agent
     haptic([15,40,15]);
     setStatus(solve?'Solve relay started · it keeps going until solved':'Terminal opening · appears in Agents with its chat link','ok');
     setTimeout(()=>{ location.href = START + '/agents'; }, 1500);
-  } catch(e){ setStatus('Could not reach relay ('+e.message+')','err'); $('go').disabled = false; }
+  } catch(e){ setStatus('Could not reach relay ('+e.message+') · press again, it will not double-start','err'); $('go').disabled = false; }
 }
 $('go').addEventListener('click', start);
+// A different task is a different agent, so it must not reuse the previous press's key.
+$('task').addEventListener('input', ()=>{ reqId = null; });
 </script>
 </body>
 </html>
