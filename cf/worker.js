@@ -461,7 +461,11 @@ export class QueueDO {
         if (hit) return json({ ok: true, name: hit.name, duplicate: true });
       }
       const slug = (task.split('\n')[0].toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 22)) || 'agent';
-      const name = 'ag-' + slug + '-' + crypto.randomUUID().replace(/-/g, '').slice(0, 4);
+      // lotron- prefix: match the hostname-prefixed naming every session on the
+      // PC uses (RC auto-names are lotron-<word>-<word>); was 'ag-' until
+      // 2026-07-31 — those names bypassed the convention and rode handover
+      // chains forever. handover-go.sh migrates surviving ag-* chains.
+      const name = 'lotron-' + slug + '-' + crypto.randomUUID().replace(/-/g, '').slice(0, 4);
       const prompt = b.endless
         ? (task + '\n\nWork autonomously and keep going until this is fully solved and verified. Do not stop or wait for further input until it is done.')
         : task;
