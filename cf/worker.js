@@ -22,6 +22,43 @@ const CONTINUE_MSG = 'Continue working on the task now. Pick up exactly where yo
 const wrapEndless = (t) => String(t || '') + ENDLESS_PROTOCOL;
 const isSolved = (r) => /\[\[\s*SOLVED\s*\]\]/i.test(String(r || ''));
 
+// ---- agent naming ----
+// Auto-named agents get a readable colour word instead of the old 4 random hex chars, so an
+// unnamed agent still reads like a name ("review-open-prs-crimson") rather than a serial number.
+const COLOUR_WORDS = [
+  'crimson', 'scarlet', 'amber', 'saffron', 'gold', 'olive', 'jade', 'emerald',
+  'teal', 'cyan', 'azure', 'cobalt', 'indigo', 'violet', 'magenta', 'rose',
+  'coral', 'copper', 'bronze', 'silver', 'slate', 'onyx', 'ivory', 'pearl',
+  'mint', 'lime', 'moss', 'fern', 'ochre', 'rust', 'sienna', 'umber',
+  'plum', 'orchid', 'lilac', 'denim', 'frost', 'ash', 'ember', 'clay'
+];
+// The DISPLAY name is whatever the user typed, kept verbatim — original case, spaces and
+// punctuation preserved. Nothing downstream needs it sanitized: the CLI's --name /
+// --remote-control take the string as-is (verified 2026-08-01 — "Name Space Test" came back
+// unchanged from GET /v1/code/sessions, which is what the claude.ai Code tab header renders),
+// and claude-tab.sh %q-escapes it into bash. So strip only what would break a Windows filename
+// or a terminal title, and cap the length so a pasted paragraph can't become a name. A control
+// char maps to a space rather than being dropped, so words cannot fuse.
+const tameName = (s) => Array.from(String(s || ''))
+  .map((ch) => (ch.codePointAt(0) < 32 || ch.codePointAt(0) === 127) ? ' ' : ch).join('')
+  .replace(/[\\/:*?"<>|]+/g, ' ')   // illegal in a Windows filename
+  .replace(/\s+/g, ' ')
+  .trim().slice(0, 60).trim();
+// Filesystem form of a name: the launcher/prompt/.claim filenames in the admin-queue. Kept
+// plain ASCII so the elevated wrapper's `-like '*.sh'` scan and its BaseName -> .prompt.txt
+// pairing keep working. Never shown to the user.
+const slugify = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+// Final guard on a filesystem slug. Two things it must never be: empty (the launcher would be
+// named ".sh" and the wrapper's BaseName pairing would break), or something that looks like a
+// Solve generation — BOTH reapers key on ^(sv[0-9a-z]+)-g(\d+)$ (poller.js and
+// claude-code-admin-wrapper.ps1), so an agent a user happens to name "Svc G2" must not be
+// mistaken for relay generation 2 and have its "older generations" hunted down and closed.
+const fsSlug = (s) => {
+  const v = String(s || '').slice(0, 40).replace(/-+$/g, '');
+  if (!v) return 'agent';
+  return /^sv[0-9a-z]+-g\d+$/i.test(v) ? 'a-' + v : v;
+};
+
 // ---- Solve mode: a relay of agents that never gives up ----
 const SOLVE_HANDOVER_BASE = '/c/Users/Lloyd Gibbs/.agent-button-spawns/solve/';
 function buildSolvePrompt(goal, gen, solveId, relay, secret, firstGen) {
@@ -461,34 +498,50 @@ export class QueueDO {
         if (hit) return json({ ok: true, name: hit.name, duplicate: true });
       }
       const spawns = (await this.storage.get('spawns')) || [];
-      // The user can name the agent themselves; slugified so it stays safe as a launcher
-      // filename, a tab title, and a --remote-control session name.
-      const custom = String(b.name || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40).replace(/-+$/g, '');
+      // The name the user typed, used verbatim as the display name (see tameName above); the
+      // filesystem-safe form lives on a separate `slug` field further down.
+      const custom = tameName(b.name);
       let name;
       if (custom) {
-        // lotron- prefix stays enforced (hostname convention every session on the PC follows).
-        name = custom.startsWith('lotron-') ? custom : 'lotron-' + custom;
-        // Suffix a collision rather than honor it: a same-named launcher still sitting in the
-        // admin-queue would be overwritten before it is claimed, and a name minted <60min ago
-        // (the queue's launcher purge horizon) is likely a still-live session.
-        const recent = new Set(spawns.map((x) => x.name));
-        for (const k of keys) if (k.name && Date.now() - k.ts < 60 * 60 * 1000) recent.add(k.name);
-        if (recent.has(name)) { let n = 2; while (recent.has(name + '-' + n)) n++; name = name + '-' + n; }
+        name = custom;
       } else {
-        const slug = (task.split('\n')[0].toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 22)) || 'agent';
-        // lotron- prefix: match the hostname-prefixed naming every session on the
-        // PC uses (RC auto-names are lotron-<word>-<word>); was 'ag-' until
-        // 2026-07-31 — those names bypassed the convention and rode handover
-        // chains forever. handover-go.sh migrates surviving ag-* chains.
-        name = 'lotron-' + slug + '-' + crypto.randomUUID().replace(/-/g, '').slice(0, 4);
+        // Auto-name: <task-slug>-<colour>. No hostname prefix (that is the CLI's own default for
+        // UNnamed sessions, not something we should be imitating), and a readable colour word
+        // instead of the old 4 hex chars — same spirit as the FIRST/SECOND codename arrays used
+        // elsewhere. Collisions re-roll the colour rather than growing a hex tail.
+        const stem = slugify(task.split('\n')[0]).slice(0, 22).replace(/-+$/g, '') || 'agent';
+        name = stem + '-' + COLOUR_WORDS[Math.floor(Math.random() * COLOUR_WORDS.length)];
+      }
+      // Suffix a collision rather than honor it: a same-named launcher still sitting in the
+      // admin-queue would be overwritten before it is claimed, and a name minted <60min ago
+      // (the queue's launcher purge horizon) is likely a still-live session. Compare on the SLUG,
+      // not the display name — the slug is what becomes a filename, and two different display
+      // names ("Rental Search" / "rental-search") can collide there while looking distinct.
+      const taken = new Set();
+      for (const x of spawns) taken.add(x.slug || slugify(x.name));
+      for (const k of keys) if (k.name && Date.now() - k.ts < 60 * 60 * 1000) taken.add(k.slug || slugify(k.name));
+      let slug = fsSlug(slugify(name));
+      if (taken.has(slug)) {
+        if (custom) {
+          let n = 2;
+          while (taken.has(fsSlug(slugify(name + ' ' + n)))) n++;
+          name = name + ' ' + n;
+        } else {
+          const stem = name.slice(0, name.lastIndexOf('-'));
+          let tries = 0;
+          do { name = stem + '-' + COLOUR_WORDS[Math.floor(Math.random() * COLOUR_WORDS.length)]; }
+          while (taken.has(fsSlug(slugify(name))) && ++tries < 12);
+          if (taken.has(fsSlug(slugify(name)))) { let n = 2; while (taken.has(fsSlug(slugify(name + '-' + n)))) n++; name = name + '-' + n; }
+        }
+        slug = fsSlug(slugify(name));
       }
       const prompt = b.endless
         ? (task + '\n\nWork autonomously and keep going until this is fully solved and verified. Do not stop or wait for further input until it is done.')
         : task;
-      spawns.push({ name, prompt, cwd: String(b.cwd || ''), dispatch: !!b.dispatch, goal: task, ts: Date.now() });
+      spawns.push({ name, slug, prompt, cwd: String(b.cwd || ''), dispatch: !!b.dispatch, goal: task, ts: Date.now() });
       await this.storage.put('spawns', spawns.slice(-20));
       if (reqId) {
-        keys.push({ k: reqId, name, ts: Date.now() });
+        keys.push({ k: reqId, name, slug, ts: Date.now() });
         await this.storage.put('spawnkeys', keys.slice(-40));
       }
       this.wake('spawn');
@@ -525,7 +578,9 @@ export class QueueDO {
       const customId = String(b.name || '').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 20);
       let solveId = 'sv' + (customId || crypto.randomUUID().replace(/-/g, '').slice(0, 6));
       while (solves.some((x) => x.id === solveId)) solveId += crypto.randomUUID().replace(/-/g, '').slice(0, 2);
-      const titleName = String(b.name || '').trim().slice(0, 40);
+      // The card title is the name exactly as typed. Only the id is squashed, and only because
+      // the two reapers' ^(sv[0-9a-z]+)-g(\d+)$ regexes demand it.
+      const titleName = tameName(b.name);
       solves.unshift({ id: solveId, title: titleName || goal.split('\n')[0].slice(0, 70), goal: goal.slice(0, 600), cwd, dispatch: !!b.dispatch, status: 'solving', generation: 1, createdAt: now, lastActivity: now, lastBeat: now, beatSinceSpawn: false, deadSpawns: 0, autoContinues: 0 });
       await this.storage.put('solves', solves.slice(0, 30));
       const spawns = (await this.storage.get('spawns')) || [];
@@ -536,7 +591,7 @@ export class QueueDO {
         await this.storage.put('spawnkeys', keys.slice(-40));
       }
       this.wake('solve');
-      return json({ ok: true, id: solveId });
+      return json({ ok: true, id: solveId, title: titleName });
     }
     if (op === 'solvenext') {
       const b = await request.json(); // {solveId, relay}

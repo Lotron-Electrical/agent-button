@@ -328,8 +328,14 @@ async function pollSpawnOnce() {
   } catch (_) { return false; }
   if (!s) return false;
   try { fs.mkdirSync(ADMIN_QUEUE, { recursive: true }); } catch (_) {}
-  const promptFile = path.join(ADMIN_QUEUE, s.name + '.prompt.txt');
-  const launcherFile = path.join(ADMIN_QUEUE, s.name + '.sh');
+  // The agent's DISPLAY name (s.name) is whatever the user typed — it can hold spaces, capitals
+  // and punctuation, and it goes through to --title / --remote-control untouched. Filenames need
+  // the tame form: the relay sends it as s.slug, and the fallback keeps an already-queued record
+  // (minted before slug existed) launching. Solve generations have no slug and don't need one —
+  // 'sv<id>-g<N>' is already ASCII, and the wrapper's reap matches on exactly that BaseName.
+  const fsName = String(s.slug || s.name || 'agent').replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^[-.]+/, '') || 'agent';
+  const promptFile = path.join(ADMIN_QUEUE, fsName + '.prompt.txt');
+  const launcherFile = path.join(ADMIN_QUEUE, fsName + '.sh');
   const user = os.userInfo().username;
   const pathDirs = [
     '/c/Users/' + user + '/AppData/Local/Microsoft/WindowsApps',
@@ -352,7 +358,9 @@ async function pollSpawnOnce() {
   if (s.dispatch && s.goal) {
     try {
       const mod = await loadDispatch();
-      const { scope, decision } = await mod.prepareDispatchScope({ goal: String(s.goal), workerName: s.name });
+      // fsName, not s.name: workerName becomes a scratch DIRECTORY under DISPATCH_RUNDIR/workers
+      // (and junction targets inside it), so it has to be the tame form.
+      const { scope, decision } = await mod.prepareDispatchScope({ goal: String(s.goal), workerName: fsName });
       cwdArg = toMsys(scope.cwd);
       if (scope.mcpConfigPath) {
         scopeArgs += ' --mcp-config ' + bq(scope.mcpConfigPath);

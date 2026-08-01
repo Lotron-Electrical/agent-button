@@ -76,7 +76,9 @@
 
   <div style="margin-top:14px">
     <label for="name">Agent name (optional)</label>
-    <input id="name" type="text" placeholder="auto-named from the task" autocapitalize="off" autocorrect="off" spellcheck="false" />
+    <!-- autocapitalize is ON (words): this is a display name now, used exactly as typed, so the
+         phone keyboard should behave like it would for any other name field. -->
+    <input id="name" type="text" placeholder="auto-named from the task · used exactly as typed" autocapitalize="words" autocorrect="off" spellcheck="false" />
   </div>
 
   <details>
@@ -136,7 +138,11 @@ async function start(){
     const j = await r.json().catch(()=>({}));
     reqId = null; // this press is spent; the next one is a new agent
     haptic([15,40,15]);
-    setStatus(solve?('Solve relay started'+(j.id?' as '+j.id:'')+' · it keeps going until solved'):('Terminal opening'+(j.name?' as '+j.name:'')+' · appears in Agents with its chat link'),'ok');
+    // Names are shown exactly as typed. Solve also shows its id, because that (not the title) is
+    // what its terminal tabs are named — sv<squashed>-g<N>, forced by the reapers' regex.
+    const esc = (t)=>String(t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    const solveAs = j.title ? (' as '+esc(j.title)+(j.id?' ('+esc(j.id)+')':'')) : (j.id?' as '+esc(j.id):'');
+    setStatus(solve?('Solve relay started'+solveAs+' · it keeps going until solved'):('Terminal opening'+(j.name?' as '+esc(j.name):'')+' · appears in Agents with its chat link'),'ok');
     setTimeout(()=>{ location.href = START + '/agents'; }, 1500);
   } catch(e){ setStatus('Could not reach relay ('+e.message+') · press again, it will not double-start','err'); $('go').disabled = false; }
 }
