@@ -5,6 +5,7 @@
 import HTML from './app.html';
 import AGENTS from './agents.html';
 import CHAT from './chat.html';
+import RCCHAT from './rcchat.html';
 import ICON192 from './icon-192.png';
 import ICON512 from './icon-512.png';
 
@@ -137,6 +138,11 @@ export default {
     // in-app chat page (capability URL)
     if (SECRET && p === '/p/' + SECRET + '/chat') {
       const html = CHAT.replaceAll('__SECRET__', SECRET).replaceAll('__START__', '/p/' + SECRET);
+      return new Response(html, { headers: { 'content-type': 'text/html;charset=utf-8' } });
+    }
+    // terminal-agent chat page: the same real agent the claude.ai Code tab talks to, over /rc/*
+    if (SECRET && p === '/p/' + SECRET + '/rc') {
+      const html = RCCHAT.replaceAll('__SECRET__', SECRET).replaceAll('__START__', '/p/' + SECRET);
       return new Response(html, { headers: { 'content-type': 'text/html;charset=utf-8' } });
     }
     if (SECRET && p === '/p/' + SECRET + '/manifest.webmanifest') {
@@ -279,9 +285,39 @@ export default {
       return queueStub(env).fetch('https://do/chatlist', { method: 'POST' });
     }
 
+    // ---- remote-control bridge: chat with a REAL terminal agent from inside this app ----
+    // The poller is a second client of the same Claude Code session the claude.ai Code tab
+    // talks to (see pc/rc-bridge.js). It streams the transcript in via /rc/push and sends
+    // Lloyd's messages out via /rc/outnext; the phone reads with a long-poll on /rc/get.
+    if (p === '/rc/sub' && method === 'POST') {               // phone: I have this session open (or closed it)
+      if (!authed()) return json({ error: 'unauthorized' }, 401);
+      return queueStub(env).fetch('https://do/rcsub', { method: 'POST', body: await req.text() });
+    }
+    if (p === '/rc/get') {                                    // phone: long-poll the transcript
+      if (!authed()) return json({ error: 'unauthorized' }, 401);
+      return queueStub(env).fetch('https://do/rcget' + url.search, { method: 'POST' });
+    }
+    if (p === '/rc/send' && method === 'POST') {              // phone: send a message to the agent
+      if (!authed()) return json({ error: 'unauthorized' }, 401);
+      return queueStub(env).fetch('https://do/rcsend', { method: 'POST', body: await req.text() });
+    }
+    if (p === '/rc/push' && method === 'POST') {              // poller: new transcript frames
+      if (!authed()) return json({ error: 'unauthorized' }, 401);
+      return queueStub(env).fetch('https://do/rcpush', { method: 'POST', body: await req.text() });
+    }
+    if (p === '/rc/outnext') {                                // poller: drain queued outbound messages
+      if (!authed()) return json({ error: 'unauthorized' }, 401);
+      return queueStub(env).fetch('https://do/rcoutnext', { method: 'POST' });
+    }
+
     return new Response('not found', { status: 404 });
   }
 };
+
+// ---- remote-control bridge tuning ----
+const RC_CAP = 40;           // transcript messages kept per session (same ceiling as chatagents)
+const RC_SUB_TTL = 75000;    // a subscription outlives ~3 missed 25s long-polls, then expires
+const RC_WAIT_MS = 25000;    // long-poll hold. See the cost note on `rcget` before changing it.
 
 // Strongly-consistent queue. One instance ('main') serializes all ops.
 export class QueueDO {
@@ -289,6 +325,10 @@ export class QueueDO {
     this.state = state;
     this.storage = state.storage;
     this.env = env;
+    // Parked /rc/get long-polls, in memory: sessionId -> Set of resolve callbacks. Only ever
+    // populated while a request is in flight, and a DO cannot hibernate with one in flight,
+    // so there is nothing to rebuild after a wake.
+    this.rcWaiters = new Map();
   }
 
   // Nudge every connected poller that there is work to pull. Uses getWebSockets() (the live socket
@@ -302,14 +342,63 @@ export class QueueDO {
     const msg = JSON.stringify({ type: 'wantStats', ts: Date.now() });
     for (const ws of this.state.getWebSockets()) { try { ws.send(msg); } catch (_) {} }
   }
+  // Tell the poller which sessions currently have a reader, so it opens an SSE stream for
+  // exactly those and no others. Pushed over the existing socket rather than polled: a
+  // subscription list the poller had to ask for would cost requests every drain, forever.
+  pushSubs(subs) {
+    const msg = JSON.stringify({ type: 'rcsubs', ids: Object.keys(subs || {}), ts: Date.now() });
+    for (const ws of this.state.getWebSockets()) { try { ws.send(msg); } catch (_) {} }
+  }
   async webSocketMessage(ws, message) {
     try {
       const m = typeof message === 'string' ? JSON.parse(message) : null;
-      if (m && m.type === 'hello') ws.send(JSON.stringify({ type: 'hello-ack', ts: Date.now() }));
+      if (m && m.type === 'hello') {
+        // The ack carries the live subscription list: a reconnecting poller (the socket drops
+        // about a dozen times a day) re-syncs its streams without an extra request.
+        const subs = (await this.storage.get('rcsubs')) || {};
+        const now = Date.now();
+        ws.send(JSON.stringify({ type: 'hello-ack', ts: now, rcsubs: Object.keys(subs).filter((k) => subs[k] > now) }));
+      }
     } catch (_) {}
   }
   async webSocketClose(ws, code) { try { ws.close(code || 1000, 'bye'); } catch (_) {} }
   async webSocketError() {}
+
+  // ---- remote-control bridge helpers ----
+  // Drop expired subscriptions. A chat page that is closed without unsubscribing (phone
+  // backgrounded, tab killed) stops renewing, so this is what eventually tears the stream down.
+  async rcPrune(subs) {
+    const s = subs || (await this.storage.get('rcsubs')) || {};
+    const now = Date.now();
+    let changed = false;
+    for (const k of Object.keys(s)) if (!(s[k] > now)) { delete s[k]; changed = true; }
+    if (changed) { await this.storage.put('rcsubs', s); this.pushSubs(s); }
+    return s;
+  }
+  // Renew (or create) a lease on a session. A brand-new one is pushed to the poller straight
+  // away so the SSE stream starts while the app's first long-poll is still in flight.
+  async rcTouch(id) {
+    if (!id) return;
+    const subs = (await this.storage.get('rcsubs')) || {};
+    const now = Date.now();
+    let changed = !(subs[id] > now);
+    for (const k of Object.keys(subs)) if (k !== id && !(subs[k] > now)) { delete subs[k]; changed = true; }
+    // Skip the write while the existing lease is still fresh, so a 25s long-poll does not
+    // rewrite this key on every hit for nothing.
+    if (changed || subs[id] - now < RC_SUB_TTL / 2) {
+      subs[id] = now + RC_SUB_TTL;
+      await this.storage.put('rcsubs', subs);
+      if (changed) this.pushSubs(subs);
+    }
+  }
+  // Release every long-poll parked on this session.
+  rcNotify(id) {
+    const set = this.rcWaiters.get(id);
+    if (!set || !set.size) return;
+    const fns = [...set];
+    set.clear();
+    for (const fn of fns) { try { fn(); } catch (_) {} }
+  }
 
   async fetch(request) {
     // The poller's push channel: accept a hibernatable WebSocket. While idle the DO hibernates
@@ -696,6 +785,126 @@ export class QueueDO {
       const kept = spawns.filter((s) => !(s.name && s.name.startsWith((b.solveId || '\0') + '-g')));
       if (kept.length !== spawns.length) await this.storage.put('spawns', kept);
       return json({ ok: true });
+    }
+
+    // ---- remote-control bridge ----
+    // Storage: rcmsgs:<sessionId> = {n, messages:[{n,role,text,ts,uuid}], status, activity},
+    // rcsubs = {sessionId: expiresAt}, rcout = [{sessionId, text, uuid, ts}].
+    // `n` is a per-session monotonic counter the phone uses as its read cursor; it is ours,
+    // not the API's sequence_num, because a locally echoed message has no sequence number yet.
+    if (op === 'rcsub') {
+      const b = await request.json().catch(() => ({}));
+      const id = String(b.sessionId || '');
+      if (!id) return json({ error: 'sessionId required' }, 400);
+      if (b.off) {
+        const subs = (await this.storage.get('rcsubs')) || {};
+        if (id in subs) { delete subs[id]; await this.storage.put('rcsubs', subs); this.pushSubs(subs); }
+        this.rcNotify(id);                       // release any long-poll parked on this session
+        return json({ ok: true, off: true });
+      }
+      await this.rcTouch(id);
+      return json({ ok: true });
+    }
+
+    if (op === 'rcget') {
+      const u = new URL(request.url);
+      const id = String(u.searchParams.get('id') || '');
+      const after = parseInt(u.searchParams.get('after') || '0', 10) || 0;
+      const wait = u.searchParams.get('wait') === '1';
+      if (!id) return json({ error: 'id required' }, 400);
+      await this.rcTouch(id);
+      const fresh = (r) => (r && Array.isArray(r.messages)) ? r.messages.filter((m) => m.n > after) : [];
+      let rec = (await this.storage.get('rcmsgs:' + id)) || null;
+      // Park until something arrives. COST NOTE: this trades request count for duration - a
+      // parked request keeps the DO active for the hold. At 25s an open chat page costs ~144
+      // requests/hour; the 2-second interval poll cf/chat.html uses would cost ~1800/hour and
+      // burn the 100k/day free tier on its own. Do not turn this back into an interval poll.
+      if (wait && !fresh(rec).length) {
+        await new Promise((resolve) => {
+          const set = this.rcWaiters.get(id) || new Set();
+          let done = false;
+          const fire = () => { if (done) return; done = true; clearTimeout(timer); set.delete(fire); resolve(); };
+          const timer = setTimeout(fire, RC_WAIT_MS);
+          set.add(fire);
+          this.rcWaiters.set(id, set);
+        });
+        rec = (await this.storage.get('rcmsgs:' + id)) || null;
+      }
+      return json({
+        messages: fresh(rec),
+        n: rec ? (rec.n || 0) : 0,
+        status: rec ? rec.status : null,
+        activity: rec ? rec.activity : null,
+        ts: Date.now()
+      });
+    }
+
+    if (op === 'rcpush') {                       // poller: normalized transcript frames
+      const b = await request.json().catch(() => ({}));
+      const id = String(b.sessionId || '');
+      if (!id) return json({ error: 'sessionId required' }, 400);
+      const rec = (await this.storage.get('rcmsgs:' + id)) || { n: 0, messages: [], status: null, activity: null };
+      // Dedupe on uuid. Three different paths can deliver the same message: an SSE replay
+      // after the poller restarts (it re-reads from sequence 0), the agent echoing a turn back
+      // out, and the local echo rcsend already wrote. All three carry the same uuid, so this
+      // one guard covers all of them.
+      const seen = new Set(rec.messages.map((m) => m.uuid).filter(Boolean));
+      for (const m of (Array.isArray(b.messages) ? b.messages : [])) {
+        const uuid = m && m.uuid ? String(m.uuid) : null;
+        if (uuid && seen.has(uuid)) continue;
+        const text = String((m && m.text) || '').slice(0, 8000);
+        if (!text) continue;
+        if (uuid) seen.add(uuid);
+        rec.n = (rec.n || 0) + 1;
+        rec.messages.push({
+          n: rec.n,
+          role: m.role === 'user' ? 'user' : (m.role === 'system' ? 'system' : 'agent'),
+          text, ts: m.ts || Date.now(), uuid
+        });
+      }
+      if (rec.messages.length > RC_CAP) rec.messages = rec.messages.slice(-RC_CAP);
+      if (b.status) rec.status = b.status;
+      rec.activity = b.activity || null;         // null clears the "using <tool>" indicator
+      rec.ts = Date.now();
+      await this.storage.put('rcmsgs:' + id, rec);
+      this.rcNotify(id);
+      return json({ ok: true, n: rec.n });
+    }
+
+    if (op === 'rcsend') {                       // phone: queue a message for the terminal agent
+      const b = await request.json().catch(() => ({}));
+      const id = String(b.sessionId || '');
+      const text = String(b.text || '').trim();
+      if (!id || !text) return json({ error: 'sessionId and text required' }, 400);
+      // The uuid is minted by the phone and carried unchanged to the Anthropic POST, which
+      // dedupes on it. A retry after a lost response therefore cannot double-send, and the
+      // local echo written here is recognised (not duplicated) when it streams back.
+      const uuid = String(b.uuid || crypto.randomUUID());
+      const now = Date.now();
+      const rec = (await this.storage.get('rcmsgs:' + id)) || { n: 0, messages: [], status: null, activity: null };
+      if (!rec.messages.some((m) => m.uuid === uuid)) {
+        rec.n = (rec.n || 0) + 1;
+        rec.messages.push({ n: rec.n, role: 'user', text: text.slice(0, 8000), ts: now, uuid });
+        if (rec.messages.length > RC_CAP) rec.messages = rec.messages.slice(-RC_CAP);
+        rec.ts = now;
+        await this.storage.put('rcmsgs:' + id, rec);
+      }
+      const out = (await this.storage.get('rcout')) || [];
+      if (!out.some((x) => x.uuid === uuid)) out.push({ sessionId: id, text, uuid, ts: now });
+      await this.storage.put('rcout', out.slice(-40));
+      await this.rcTouch(id);
+      this.wake('rc');
+      this.rcNotify(id);                         // the sender's own long-poll returns at once
+      return json({ ok: true, uuid, n: rec.n });
+    }
+
+    if (op === 'rcoutnext') {                    // poller: drain outbound + re-sync subscriptions
+      const out = (await this.storage.get('rcout')) || [];
+      if (out.length) await this.storage.put('rcout', []);
+      // Riding the subscription list back on this response is free, and it is the backstop for
+      // a pushSubs that got lost with a dropped socket.
+      const subs = await this.rcPrune();
+      return json({ items: out, subs: Object.keys(subs) });
     }
 
     return new Response('do: not found', { status: 404 });

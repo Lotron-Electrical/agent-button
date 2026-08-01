@@ -9,6 +9,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { closeSuperseded } = require('./solve-reap'); // reap superseded solve-relay tabs
+const { createRcBridge } = require('./rc-bridge');   // chat with a REAL terminal agent from the app
 
 // ---------- config ----------
 const cfgPath = process.env.AGENT_BUTTON_ENV || path.join(os.homedir(), '.agent-button.env');
@@ -32,6 +33,13 @@ const SPAWN_DIR = path.join(os.homedir(), '.agent-button-spawns');
 fs.mkdirSync(SPAWN_DIR, { recursive: true });
 const LOG = path.join(SPAWN_DIR, 'poller.log');
 const headers = { Authorization: 'Bearer ' + TOKEN };
+
+// Remote-control bridge. Holds an SSE stream of the Claude Code session transcript for exactly
+// the sessions the app currently has a chat page open on, and posts Lloyd's replies back into
+// them. The subscribed set is PUSHED to us by the relay ({type:'rcsubs'} / hello-ack), never
+// polled, so a PC with no chat page open costs nothing. `log` is a hoisted function declaration
+// below, so passing it here is fine.
+const rc = createRcBridge({ relay: RELAY, headers, log });
 
 // When Task Scheduler launches the poller it only inherits the minimal SYSTEM PATH,
 // so Git's bash, wt.exe (WindowsApps), npm and ~/.local/bin/claude are all missing.
@@ -193,7 +201,13 @@ async function reportAgents() {
       name,
       pid: d.pid,
       status: d.status || 'unknown',
+      // `chat` stays: it is the permanent "Open in Claude" fallback for when the bridge is
+      // unavailable. `bridgeSessionId` is the raw session_<ULID> the in-app chat page addresses
+      // through /rc/*, and `waitingFor` (e.g. "permission prompt") tells the app WHY a session
+      // is sitting on 'waiting' so it can say so instead of just looking stalled.
       chat: d.bridgeSessionId ? ('https://claude.ai/code/' + d.bridgeSessionId) : null,
+      bridgeSessionId: d.bridgeSessionId || null,
+      waitingFor: d.waitingFor || null,
       cwd: d.cwd || null,
       startedAt: d.startedAt || null,
       updatedAt: d.updatedAt || null,
@@ -492,7 +506,12 @@ async function reportExternal() {
       return {
         name,
         status: d && d.status ? d.status : 'live',
+        // See reportAgents for why all three of chat / bridgeSessionId / waitingFor are sent.
+        // This is the list the dashboard actually renders, so the in-app chat page reads
+        // bridgeSessionId from here.
         chat: d && d.bridgeSessionId ? ('https://claude.ai/code/' + d.bridgeSessionId) : null,
+        bridgeSessionId: (d && d.bridgeSessionId) || null,
+        waitingFor: (d && d.waitingFor) || null,
         cwd: d ? d.cwd : null
       };
     });
@@ -610,6 +629,116 @@ const PONG_TIMEOUT_MS = parseInt(cfg.PONG_TIMEOUT_MS, 10) || 45000;
 let ws = null, wsBackoffMs = 1000, keepalive = null, lastPong = 0, reconnectTimer = null;
 let draining = false, drainAgain = false;
 
+// Deliver messages Lloyd typed on the in-app chat page into the real terminal agent.
+//
+// Guarded so an idle PC costs nothing extra: with no chat page open there is nothing queued and
+// nothing to ask about, and 'wake' is the relay telling us a message was JUST queued. 'connect'
+// is in there because a message queued while the socket was down had its wake pushed into the
+// void — without it that message would sit until the 90s safety drain. Reconnects run about a
+// dozen times a day, so the cost is noise.
+//
+// The response also carries the authoritative subscription list, which is the backstop for an
+// {type:'rcsubs'} push that went down with a dropped socket.
+async function drainRcOut(reason) {
+  if (!rc.hasSubs() && reason !== 'wake' && reason !== 'connect') return;
+  let j = null;
+  try {
+    const r = await fetch(RELAY + '/rc/outnext', { headers });
+    if (!r.ok) return;
+    j = await r.json();
+  } catch (_) { return; }
+  if (!j) return;
+  setRcSubs(j.subs);
+  for (const item of (Array.isArray(j.items) ? j.items : [])) {
+    const res = await rc.send(item);
+    if (res.ok) continue;
+    // A send that fails is the one thing the app cannot detect on its own: the message just
+    // never appears. Write the reason back into the transcript as a system line so it is
+    // visible, and the user can fall back to the "Open in Claude" link. The uuid is derived
+    // from the message's own, so a retried failure dedupes instead of stacking up.
+    log('rc send failed -> ' + item.sessionId + ': ' + res.error);
+    try {
+      await fetch(RELAY + '/rc/push', {
+        method: 'POST',
+        headers: { ...headers, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sessionId: item.sessionId,
+          messages: [{ role: 'system', text: 'Could not deliver that message: ' + res.error, ts: Date.now(), uuid: item.uuid + ':err' }],
+          ts: Date.now()
+        })
+      });
+    } catch (_) {}
+  }
+}
+
+// ---------- remote-control: a session whose terminal has closed ----------
+// rc-bridge only learns a session is dead when the Anthropic API 404s its event stream, and
+// that does NOT happen when a terminal tab closes: the cloud session record outlives the local
+// process, so the stream keeps returning 200 and the bridge keeps reporting 'live'. An open
+// chat page would therefore sit on "live" forever with a composer that accepts messages nobody
+// will ever read. The local session registry is the real source of truth - a bridgeSessionId
+// with no alive pid behind it is gone - so we detect it here and push status:'gone' once.
+const RC_GONE_GRACE_MS = 20000;      // absent this long before we call it: covers a session that
+                                     // registers itself a moment after its chat page was opened
+const rcGone = new Set();            // ids already reported gone; push once, and stop streaming them
+const rcMissingSince = new Map();    // id -> when we first saw it absent from the registry
+let lastRelaySubs = [];              // the relay's authoritative "pages currently open" list
+
+// Every subscription update goes through here so a gone session can never be re-streamed: the
+// relay keeps listing it (the page is still open), but re-attaching would let a stream reconnect
+// push status:'live' straight back over our 'gone' and flip the page back to a live composer.
+function setRcSubs(ids) {
+  lastRelaySubs = (ids || []).filter(Boolean).map(String);
+  rc.setSubs(lastRelaySubs.filter((id) => !rcGone.has(id)));
+}
+
+// bridgeSessionIds of every session with a live pid. Returns null (not an empty set) if the
+// registry cannot be read, so an unreadable directory is never mistaken for "everything died".
+function liveBridgeIds() {
+  const dir = path.join(os.homedir(), '.claude', 'sessions');
+  let files;
+  try { files = fs.readdirSync(dir).filter((f) => f.endsWith('.json')); } catch (_) { return null; }
+  const out = new Set();
+  for (const f of files) {
+    let d;
+    try { d = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')); } catch (_) { continue; }
+    if (!d || !d.pid || !alivePid(d.pid) || !d.bridgeSessionId) continue;
+    out.add(String(d.bridgeSessionId));
+  }
+  return out;
+}
+
+async function reapGoneRcSessions() {
+  if (!lastRelaySubs.length) return;
+  const live = liveBridgeIds();
+  if (!live) return;                                  // registry unreadable: never guess
+  const now = Date.now();
+  let changed = false;
+  for (const id of lastRelaySubs) {
+    if (live.has(id)) {                               // alive (or back from the dead after a resume)
+      rcMissingSince.delete(id);
+      if (rcGone.delete(id)) changed = true;
+      continue;
+    }
+    if (!rcMissingSince.has(id)) { rcMissingSince.set(id, now); continue; }
+    if (now - rcMissingSince.get(id) < RC_GONE_GRACE_MS || rcGone.has(id)) continue;
+    rcGone.add(id);
+    changed = true;
+    log('rc: session gone (no live pid) -> ' + id);
+    try {
+      await fetch(RELAY + '/rc/push', {
+        method: 'POST',
+        headers: { ...headers, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId: id, messages: [], status: 'gone', activity: null, ts: Date.now() })
+      });
+    } catch (_) { rcGone.delete(id); }                // relay unreachable: retry on the next tick
+  }
+  for (const id of [...rcMissingSince.keys()]) {
+    if (!lastRelaySubs.includes(id)) { rcMissingSince.delete(id); rcGone.delete(id); }
+  }
+  if (changed) setRcSubs(lastRelaySubs);              // start/stop streaming to match
+}
+
 // Pull every queue dry. Re-entrancy guarded: a wake during a drain just flags a re-run.
 async function drainOnce(reason) {
   if (draining) { drainAgain = true; return; }
@@ -624,6 +753,7 @@ async function drainOnce(reason) {
     }
     for (;;) { if (!(await pollSpawnOnce())) break; }                     // elevated terminal spawns (button / solve)
     while (chatInFlight < MAX_CHAT) { if (!(await tryStartChat())) break; } // in-app chat turns
+    await drainRcOut(reason);                                             // messages typed at the in-app chat page
   } finally {
     draining = false;
     if (drainAgain) { drainAgain = false; setTimeout(() => drainOnce('again'), 50); }
@@ -694,6 +824,11 @@ function connect() {
     if (!m) return;
     if (m.type === 'wake') drainOnce('wake');
     else if (m.type === 'wantStats') pushStats();
+    // Which sessions currently have a chat page open. Pushed the moment one opens or closes, so
+    // we start/stop the SSE stream immediately without ever polling for the list.
+    else if (m.type === 'rcsubs') setRcSubs(m.ids);
+    // A reconnect re-syncs off the hello ack, for free, on a socket that drops a dozen times a day.
+    else if (m.type === 'hello-ack') setRcSubs(m.rcsubs || []);
   });
   sock.addEventListener('close', () => { stopKeepalive(); scheduleReconnect(); });
   sock.addEventListener('error', () => { try { sock.close(); } catch (_) {} });
@@ -711,3 +846,6 @@ setInterval(() => drainOnce('safety'), 90 * 1000);
 setInterval(() => { pollSolveWatch(); pollDispatchSweep(); }, 5 * 60 * 1000);
 // Local-only cleanup of superseded Solve tabs — no network, no DO cost.
 setInterval(() => pollSolveReap(), 15000);
+// Notice a chatted-with terminal closing. Reads the local session registry only; it costs a
+// relay request just once, on the transition, so an idle tick is free.
+setInterval(() => reapGoneRcSessions(), 5000);

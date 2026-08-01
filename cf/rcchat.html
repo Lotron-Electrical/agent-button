@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1" />
+<meta name="theme-color" content="#0d0d0d" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<title>Terminal agent</title>
+<style>
+  :root{
+    --bg:#0d0d0d; --panel:#161616; --panel2:#1d1d1d; --line:#2a2a2a;
+    --ink:#ece7e1; --dim:#8a847c; --accent:#C15F3C; --accent2:#e0794f; --ok:#5fb87a; --err:#d9655a;
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent}
+  html,body{margin:0; height:100%}
+  body{
+    background:var(--bg); color:var(--ink); font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+    display:flex; flex-direction:column; height:100dvh;
+  }
+  header{
+    display:flex; align-items:center; gap:10px; padding:max(12px,env(safe-area-inset-top)) 14px 12px;
+    border-bottom:1px solid var(--line); background:linear-gradient(180deg,#1a1411,#0d0d0d);
+  }
+  .back{color:var(--accent2); text-decoration:none; font-size:20px; padding:2px 6px}
+  /* permanent fail-soft escape hatch: the claude.ai Code tab always works, bridge or no bridge */
+  .hopen{flex:none; height:34px; padding:0 11px; border-radius:9px; border:1px solid var(--line); background:var(--panel);
+         color:var(--accent2); font-size:12px; font-weight:600; text-decoration:none; display:flex; align-items:center}
+  .hopen:active{border-color:var(--accent)}
+  .htitle{flex:1; min-width:0}
+  .htitle .n{font-size:15px; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+  .htitle .s{font-size:11px; color:var(--dim); letter-spacing:.3px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+  .htitle .s.thinking{color:var(--accent2)}
+  .htitle .s.error{color:var(--err)}
+  .htitle .s.live{color:var(--ok)}
+  #log{flex:1; overflow-y:auto; padding:16px 12px 6px; display:flex; flex-direction:column; gap:10px}
+  .msg{max-width:86%; padding:11px 13px; border-radius:14px; font-size:14.5px; line-height:1.5; white-space:pre-wrap; word-break:break-word}
+  .msg.user{align-self:flex-end; background:linear-gradient(135deg,var(--accent2),var(--accent)); color:#1a0f0a; border-bottom-right-radius:5px}
+  .msg.user.pending{opacity:.55}
+  .msg.user.failed{opacity:1; background:none; border:1px solid var(--err); color:var(--err)}
+  .retry{font-size:11px; margin-top:5px; text-transform:uppercase; letter-spacing:.4px; opacity:.85}
+  .msg.agent{align-self:flex-start; background:var(--panel); border:1px solid var(--line); border-bottom-left-radius:5px}
+  .msg.system{align-self:center; background:rgba(217,101,90,.12); border:1px solid rgba(217,101,90,.4); color:var(--err); font-size:13px; max-width:94%}
+  .who{font-size:10px; letter-spacing:.5px; text-transform:uppercase; opacity:.65; margin-bottom:4px}
+  .thinking-row{align-self:flex-start; display:flex; align-items:center; gap:8px; color:var(--dim); font-size:13px; padding:4px 2px}
+  .spin{width:13px;height:13px;border:2px solid var(--accent);border-top-color:transparent;border-radius:50%;animation:s .7s linear infinite}
+  @keyframes s{to{transform:rotate(360deg)}}
+  .gonebar{display:none; align-items:center; gap:10px; padding:11px 12px; border-top:1px solid var(--line);
+           background:rgba(217,101,90,.1); font-size:13px; color:var(--err)}
+  .gonebar .lbl{flex:1}
+  .gonebar a{color:var(--accent2); text-decoration:none; font-weight:600; white-space:nowrap}
+  .composer{display:flex; gap:8px; padding:10px 12px calc(10px + env(safe-area-inset-bottom)); border-top:1px solid var(--line); background:var(--bg)}
+  textarea{
+    flex:1; resize:none; background:var(--panel); color:var(--ink); border:1px solid var(--line); border-radius:12px;
+    padding:11px 13px; font:inherit; font-size:16px; outline:none; max-height:120px; min-height:46px;
+  }
+  textarea:focus{border-color:var(--accent)}
+  textarea:disabled{opacity:.5}
+  .send{border:none; border-radius:12px; padding:0 18px; font:inherit; font-size:15px; font-weight:700; color:#1a0f0a;
+        background:linear-gradient(135deg,var(--accent2),var(--accent)); min-width:64px}
+  .send:disabled{opacity:.45}
+  .empty{color:var(--dim); text-align:center; margin:auto; font-size:14px; line-height:1.8}
+</style>
+</head>
+<body>
+  <header>
+    <a class="back" href="__START__/agents" title="back">&lsaquo;</a>
+    <div class="htitle"><div class="n" id="hname">Agent</div><div class="s" id="hstatus">connecting&hellip;</div></div>
+    <a class="hopen" id="hopen" href="https://claude.ai/code" target="_blank" rel="noopener">Claude &#8599;</a>
+  </header>
+  <div id="log"></div>
+  <div class="gonebar" id="gonebar"><span class="lbl">This session has ended.</span><a id="goneopen" href="https://claude.ai/code" target="_blank" rel="noopener">Open in Claude &#8599;</a></div>
+  <div class="composer">
+    <textarea id="box" placeholder="Message this agent&hellip;" rows="1"></textarea>
+    <button class="send" id="send">Send</button>
+  </div>
+
+<script>
+// Chat with a REAL terminal agent, through the remote-control bridge.
+// The poller streams the session transcript into the DO (/rc/push); this page reads it with a
+// CONTINUOUS LONG-POLL (/rc/get?wait=1, ~25s hold) and sends with /rc/send. Do NOT turn this
+// back into an interval poll: a 2s poll costs ~43k Durable Object requests/day with one page
+// left open, which is most of the 100k/day free tier on its own.
+const SECRET = "__SECRET__";
+const START  = "__START__";
+const Q = new URLSearchParams(location.search);
+const ID   = Q.get('id') || '';
+const NAME = Q.get('name') || '';                       // /rc/get carries no name, so the URL does
+const CLAUDE = ID ? ('https://claude.ai/code/' + encodeURIComponent(ID)) : 'https://claude.ai/code';
+const $ = (i)=>document.getElementById(i);
+
+function api(p, opts){ opts = opts || {}; return fetch(p, { ...opts, headers:{ Authorization:'Bearer '+SECRET, ...(opts.headers||{}) } }); }
+function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function sleep(ms){ return new Promise(r=>setTimeout(r, ms)); }
+function atBottom(){ const l=$('log'); return l.scrollHeight - l.scrollTop - l.clientHeight < 60; }
+function uuid(){ try{ return crypto.randomUUID(); }catch(e){ return 'u'+Date.now()+Math.random().toString(16).slice(2); } }
+
+let msgs = [];                 // {n, role, text, ts, uuid} as delivered by the DO, in order
+let seen = new Set();          // uuids already in msgs
+let cursor = 0;                // highest n seen; the long-poll's `after`
+let status = null;             // connecting | live | error | gone | null (poller has said nothing)
+let activity = null;           // {tool, ts} -> "using Bash..."
+let netErr = false;            // this phone cannot reach the relay
+const pending = new Map();     // uuid -> {text, ts, failed} : sent, echo not back yet
+let gen = 0, running = false, inflight = null;
+
+// ---- render ----
+function render(){
+  const stick = atBottom();
+  const rows = msgs.map(m=>{
+    const cls = m.role==='user' ? 'user' : (m.role==='system' ? 'system' : 'agent');
+    const who = m.role==='agent' ? '<div class="who">agent</div>' : '';
+    return '<div class="msg '+cls+'">'+who+esc(m.text)+'</div>';
+  });
+  pending.forEach((p, u)=>{
+    rows.push('<div class="msg user pending'+(p.failed?' failed':'')+'" data-uuid="'+esc(u)+'">'+esc(p.text)+
+              (p.failed ? '<div class="retry">not sent &middot; tap to retry</div>' : '')+'</div>');
+  });
+  if (activity && activity.tool) rows.push('<div class="thinking-row"><div class="spin"></div>using '+esc(activity.tool)+'&hellip;</div>');
+  if (!rows.length){
+    rows.push('<div class="empty">'+(!ID ? 'No session id.' :
+      (status ? 'No messages yet.<br>Say something to this agent.' : 'Waiting for your PC&hellip;<br>The bridge starts when the poller picks this up.'))+'</div>');
+  }
+  $('log').innerHTML = rows.join('');
+  if (stick) $('log').scrollTop = $('log').scrollHeight;
+  renderStatus();
+}
+
+function renderStatus(){
+  const el = $('hstatus');
+  let cls = 's', label;
+  if (!ID){ cls='s error'; label='no session id'; }
+  else if (netErr){ cls='s error'; label='can’t reach relay'; }
+  else if (status === 'gone'){ cls='s error'; label='session ended'; }
+  else if (status === 'error'){ cls='s error'; label='bridge error · use Claude ↗'; }
+  else if (status === 'connecting'){ cls='s thinking'; label='connecting to the agent…'; }
+  else if (status === 'live'){
+    if (activity && activity.tool){ cls='s thinking'; label='working · '+activity.tool; }
+    else { cls='s live'; label='live'; }
+  }
+  else { cls='s thinking'; label='waiting for your PC…'; }
+  el.className = cls; el.textContent = label;
+  const dead = !ID || status === 'gone';
+  $('box').disabled = dead; $('send').disabled = dead;
+  $('gonebar').style.display = (ID && status === 'gone') ? 'flex' : 'none';
+}
+
+function apply(data){
+  const n = typeof data.n === 'number' ? data.n : 0;
+  if (n < cursor){ msgs = []; seen = new Set(); cursor = 0; }   // DO record reset: resync from scratch
+  for (const m of (Array.isArray(data.messages) ? data.messages : [])){
+    if (m.uuid){
+      pending.delete(m.uuid);                                   // our own echo came home
+      if (seen.has(m.uuid)) continue;
+      seen.add(m.uuid);
+    }
+    if (typeof m.n === 'number' && m.n > cursor) cursor = m.n;
+    msgs.push(m);
+  }
+  if (n > cursor) cursor = n;
+  if (msgs.length > 200) msgs = msgs.slice(-200);
+  status = data.status || null;
+  activity = data.activity || null;
+  render();
+}
+
+// ---- long-poll loop ----
+async function pollLoop(my){
+  let backoff = 1000, wait = 0;          // first pass returns immediately with the current state
+  while (my === gen){
+    const ctl = new AbortController();
+    inflight = ctl;
+    const guard = setTimeout(()=>ctl.abort(), 40000);   // the DO holds 25s; anything longer is a stall
+    try{
+      const r = await api('/rc/get?id='+encodeURIComponent(ID)+'&after='+cursor+(wait?'&wait=1':''), { signal: ctl.signal });
+      clearTimeout(guard);
+      if (my !== gen) return;
+      if (!r.ok) throw new Error('HTTP '+r.status);
+      const data = await r.json();
+      netErr = false; backoff = 1000; wait = 1;
+      apply(data);
+    }catch(e){
+      clearTimeout(guard);
+      if (my !== gen) return;
+      if (e && e.name === 'AbortError') continue;       // our own stall guard: re-poll at once
+      netErr = true; renderStatus();
+      await sleep(backoff);
+      backoff = Math.min(10000, backoff * 2);
+    }
+  }
+}
+
+// ---- subscription ----
+// The poller only holds an SSE stream for sessions with a live subscriber. Every /rc/get renews
+// the 75s lease itself, so this is only needed to open the stream before the first poll returns,
+// and to close it promptly when the page goes away. The TTL is the real backstop.
+function sub(on){
+  if (!ID) return;
+  const opts = { method:'POST', headers:{'Content-Type':'application/json'},
+                 body: JSON.stringify(on ? { sessionId: ID } : { sessionId: ID, off: true }) };
+  if (!on) opts.keepalive = true;        // must outlive the page; sendBeacon can't set Authorization
+  try{ api('/rc/sub', opts).catch(()=>{}); }catch(e){}
+}
+
+function start(){
+  if (running || !ID) return;
+  running = true;
+  sub(true);
+  pollLoop(++gen);
+}
+function stop(){
+  if (!running) return;
+  running = false;
+  gen++;                                  // the loop returns at its next checkpoint
+  if (inflight){ try{ inflight.abort(); }catch(e){} inflight = null; }
+  sub(false);
+}
+
+// ---- send ----
+async function deliver(u){
+  const p = pending.get(u);
+  if (!p) return;
+  p.failed = false; render();
+  try{
+    const r = await api('/rc/send', { method:'POST', headers:{'Content-Type':'application/json'},
+                                      body: JSON.stringify({ sessionId: ID, text: p.text, uuid: u }) });
+    if (!r.ok) throw new Error('HTTP '+r.status);
+    // rcsend writes the echo into the DO and releases our parked poll, so it lands in ~100ms.
+  }catch(e){
+    const q = pending.get(u);
+    if (q){ q.failed = true; render(); }
+  }
+}
+
+function send(){
+  if (!ID || status === 'gone') return;
+  const text = $('box').value.trim();
+  if (!text) return;
+  $('box').value = ''; $('box').style.height = '46px';
+  // The uuid is minted here and carried unchanged all the way to Anthropic's POST, which dedupes
+  // on it -- so a retry over a flaky phone connection can never double-send.
+  const u = uuid();
+  pending.set(u, { text, ts: Date.now(), failed: false });
+  render();
+  deliver(u);
+}
+
+$('send').addEventListener('click', send);
+$('box').addEventListener('keydown', (e)=>{ if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); send(); } });
+$('box').addEventListener('input', ()=>{ const b=$('box'); b.style.height='46px'; b.style.height=Math.min(120,b.scrollHeight)+'px'; });
+$('log').addEventListener('click', (e)=>{
+  const el = e.target.closest('.msg.user.failed');
+  if (el && el.dataset.uuid) deliver(el.dataset.uuid);     // same uuid, so a retry cannot double-send
+});
+document.addEventListener('visibilitychange', ()=>{ if (document.hidden) stop(); else start(); });
+window.addEventListener('pagehide', stop);
+
+$('hname').textContent = NAME || (ID ? 'Terminal agent' : 'Agent');
+$('hopen').href = CLAUDE;
+$('goneopen').href = CLAUDE;
+document.title = NAME || 'Terminal agent';
+render();
+start();
+</script>
+</body>
+</html>
