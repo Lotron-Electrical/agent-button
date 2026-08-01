@@ -74,6 +74,11 @@
   <label for="task">Task / first message</label>
   <textarea id="task" placeholder="What should this agent do?&#10;e.g. review the open PRs in ~/myrepo and tell me the risks" autofocus></textarea>
 
+  <div style="margin-top:14px">
+    <label for="name">Agent name (optional)</label>
+    <input id="name" type="text" placeholder="auto-named from the task" autocapitalize="off" autocorrect="off" spellcheck="false" />
+  </div>
+
   <details>
     <summary>Advanced</summary>
     <div class="adv">
@@ -110,12 +115,13 @@ async function start(){
   const task = $('task').value.trim();
   if (!task){ setStatus('Type a task first','err'); $('task').focus(); return; }
   const cwd = $('cwd').value.trim();
+  const name = $('name').value.trim();
   const solve = $('solve').checked;
   const dispatch = $('dispatch').checked;
   if (!reqId) reqId = newReqId();
   $('go').disabled = true; haptic(20); setStatus(solve?(dispatch?'Starting a lean Solve relay…':'Starting Solve relay on your PC…'):(dispatch?'Opening a lean scoped terminal…':'Opening a terminal on your PC…'),'go');
   const path = solve ? '/solve/new' : '/spawn';
-  const body = JSON.stringify(solve ? { goal: task, cwd, dispatch, reqId } : { task, cwd, dispatch, reqId });
+  const body = JSON.stringify(solve ? { goal: task, cwd, dispatch, reqId, name } : { task, cwd, dispatch, reqId, name });
   try{
     let r;
     try {
@@ -127,15 +133,17 @@ async function start(){
       r = await api(path, { method:'POST', headers:{'Content-Type':'application/json'}, body });
     }
     if (!r.ok) throw new Error('relay '+r.status);
+    const j = await r.json().catch(()=>({}));
     reqId = null; // this press is spent; the next one is a new agent
     haptic([15,40,15]);
-    setStatus(solve?'Solve relay started · it keeps going until solved':'Terminal opening · appears in Agents with its chat link','ok');
+    setStatus(solve?('Solve relay started'+(j.id?' as '+j.id:'')+' · it keeps going until solved'):('Terminal opening'+(j.name?' as '+j.name:'')+' · appears in Agents with its chat link'),'ok');
     setTimeout(()=>{ location.href = START + '/agents'; }, 1500);
   } catch(e){ setStatus('Could not reach relay ('+e.message+') · press again, it will not double-start','err'); $('go').disabled = false; }
 }
 $('go').addEventListener('click', start);
-// A different task is a different agent, so it must not reuse the previous press's key.
+// A different task (or name) is a different agent, so it must not reuse the previous press's key.
 $('task').addEventListener('input', ()=>{ reqId = null; });
+$('name').addEventListener('input', ()=>{ reqId = null; });
 </script>
 </body>
 </html>

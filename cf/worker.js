@@ -460,16 +460,31 @@ export class QueueDO {
         const hit = keys.find((k) => k.k === reqId && Date.now() - k.ts < 15 * 60 * 1000);
         if (hit) return json({ ok: true, name: hit.name, duplicate: true });
       }
-      const slug = (task.split('\n')[0].toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 22)) || 'agent';
-      // lotron- prefix: match the hostname-prefixed naming every session on the
-      // PC uses (RC auto-names are lotron-<word>-<word>); was 'ag-' until
-      // 2026-07-31 — those names bypassed the convention and rode handover
-      // chains forever. handover-go.sh migrates surviving ag-* chains.
-      const name = 'lotron-' + slug + '-' + crypto.randomUUID().replace(/-/g, '').slice(0, 4);
+      const spawns = (await this.storage.get('spawns')) || [];
+      // The user can name the agent themselves; slugified so it stays safe as a launcher
+      // filename, a tab title, and a --remote-control session name.
+      const custom = String(b.name || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40).replace(/-+$/g, '');
+      let name;
+      if (custom) {
+        // lotron- prefix stays enforced (hostname convention every session on the PC follows).
+        name = custom.startsWith('lotron-') ? custom : 'lotron-' + custom;
+        // Suffix a collision rather than honor it: a same-named launcher still sitting in the
+        // admin-queue would be overwritten before it is claimed, and a name minted <60min ago
+        // (the queue's launcher purge horizon) is likely a still-live session.
+        const recent = new Set(spawns.map((x) => x.name));
+        for (const k of keys) if (k.name && Date.now() - k.ts < 60 * 60 * 1000) recent.add(k.name);
+        if (recent.has(name)) { let n = 2; while (recent.has(name + '-' + n)) n++; name = name + '-' + n; }
+      } else {
+        const slug = (task.split('\n')[0].toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 22)) || 'agent';
+        // lotron- prefix: match the hostname-prefixed naming every session on the
+        // PC uses (RC auto-names are lotron-<word>-<word>); was 'ag-' until
+        // 2026-07-31 — those names bypassed the convention and rode handover
+        // chains forever. handover-go.sh migrates surviving ag-* chains.
+        name = 'lotron-' + slug + '-' + crypto.randomUUID().replace(/-/g, '').slice(0, 4);
+      }
       const prompt = b.endless
         ? (task + '\n\nWork autonomously and keep going until this is fully solved and verified. Do not stop or wait for further input until it is done.')
         : task;
-      const spawns = (await this.storage.get('spawns')) || [];
       spawns.push({ name, prompt, cwd: String(b.cwd || ''), dispatch: !!b.dispatch, goal: task, ts: Date.now() });
       await this.storage.put('spawns', spawns.slice(-20));
       if (reqId) {
@@ -500,11 +515,18 @@ export class QueueDO {
         const hit = keys.find((k) => k.k === reqId && Date.now() - k.ts < 15 * 60 * 1000);
         if (hit) return json({ ok: true, id: hit.name, duplicate: true });
       }
-      const solveId = 'sv' + crypto.randomUUID().replace(/-/g, '').slice(0, 6);
       const now = Date.now();
       const cwd = String(b.cwd || '');
       const solves = (await this.storage.get('solves')) || [];
-      solves.unshift({ id: solveId, title: goal.split('\n')[0].slice(0, 70), goal: goal.slice(0, 600), cwd, dispatch: !!b.dispatch, status: 'solving', generation: 1, createdAt: now, lastActivity: now, lastBeat: now, beatSinceSpawn: false, deadSpawns: 0, autoContinues: 0 });
+      // The user can name the relay: its id becomes sv<slug> (hyphens stripped) so generation
+      // names like svcheckhero-g2 still match the ^(sv[0-9a-z]+)-g(\d+)$ convention that BOTH
+      // the poller's scratch reap and the elevated wrapper's window reap key on. Do not put
+      // hyphens inside the id — the regexes would stop matching and husk tabs would pile up.
+      const customId = String(b.name || '').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 20);
+      let solveId = 'sv' + (customId || crypto.randomUUID().replace(/-/g, '').slice(0, 6));
+      while (solves.some((x) => x.id === solveId)) solveId += crypto.randomUUID().replace(/-/g, '').slice(0, 2);
+      const titleName = String(b.name || '').trim().slice(0, 40);
+      solves.unshift({ id: solveId, title: titleName || goal.split('\n')[0].slice(0, 70), goal: goal.slice(0, 600), cwd, dispatch: !!b.dispatch, status: 'solving', generation: 1, createdAt: now, lastActivity: now, lastBeat: now, beatSinceSpawn: false, deadSpawns: 0, autoContinues: 0 });
       await this.storage.put('solves', solves.slice(0, 30));
       const spawns = (await this.storage.get('spawns')) || [];
       spawns.push({ name: solveId + '-g1', prompt: buildSolvePrompt(goal, 1, solveId, b.relay || '', this.env.BUTTON_TOKEN, true), cwd, dispatch: !!b.dispatch, goal: goal.slice(0, 600), ts: now });
