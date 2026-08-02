@@ -80,8 +80,9 @@ ${firstGen ? 'You are generation 1. Run: mkdir -p "$(dirname ' + JSON.stringify(
 
 # HEARTBEAT (so the watchdog knows you are alive)
 At the START of every turn, and again right before you launch any long-running command, send:
-   curl -s -X POST '${relay}/solve/beat' ${auth} -d '{"solveId":"${solveId}"}'
+   curl -s -X POST '${relay}/solve/beat' ${auth} -d '{"solveId":"${solveId}","note":"<one short line: what you are on RIGHT NOW>"}'
 A watchdog automatically spawns your successor if you go silent for 30 minutes. Beat often. If a command will run longer than that, start it in the background and keep beating while it runs.
+The note is Lloyd's only window into a long relay — it is the card he sees on his phone. Make it concrete and current ("item 7 of 66, gates green"), never a status word like "working". It is optional; a beat without one keeps the previous note showing.
 
 # WHEN YOU GET STUCK OR RUN LOW ON CONTEXT (never just give up)
 When you hit a wall, run low on context, or judge the problem too large to finish this session:
@@ -716,6 +717,11 @@ export class QueueDO {
       if (sv && sv.status === 'solving') {
         const now = Date.now();
         sv.lastBeat = now; sv.beatSinceSpawn = true; sv.deadSpawns = 0; sv.lastActivity = now;
+        // Optional: what the agent is working on right now. Over a multi-day relay the card
+        // otherwise reads "∞ generation 41 · beat 2m ago" whether it is on item 3 or item 60,
+        // which is a liveness signal and not a progress one. Absent note leaves the last one
+        // standing rather than blanking the card, so a beat sent without one is not a regression.
+        if (b.note) sv.note = { text: String(b.note).slice(0, 120), at: now };
         await this.storage.put('solves', solves);
       }
       return json({ ok: true });

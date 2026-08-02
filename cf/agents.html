@@ -55,6 +55,8 @@
   .close:active{background:rgba(217,101,90,.18); color:var(--err); border-color:var(--err)}
   @keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(193,95,60,.5)}50%{box-shadow:0 0 0 6px rgba(193,95,60,0)}}
   .meta{font-size:12px; color:var(--dim); margin-bottom:12px; line-height:1.5; word-break:break-all}
+  .snote{font-size:13px; color:var(--ink); line-height:1.45; margin:2px 0 6px; padding-left:9px;
+    border-left:2px solid var(--accent); overflow-wrap:anywhere}
   .chatbtn{display:block; text-align:center; padding:12px; border-radius:11px; font-size:15px; font-weight:600;
         color:#1a0f0a; background:linear-gradient(135deg,var(--accent2),var(--accent)); box-shadow:0 6px 18px rgba(193,95,60,.3)}
   /* .chatbtn is also used on a real <a> (the bridge chat action), so pin the dark label against
@@ -136,7 +138,10 @@ function renderSolves(solves){
     if(s.status==='solved'){ st={label:'solved',cls:'idle'}; line=gen+(s.summary?' · '+s.summary:''); }
     else if(s.status==='stopped'){ st={label:'stopped',cls:'other'}; line=gen+' · stopped'; actions='<button class="srelay cont" data-id="'+esc(s.id)+'">Resume ›</button>'; }
     else { st={label:'solving',cls:'busy'}; line=gen+(s.autoContinues?' · '+s.autoContinues+' auto-continued':'')+(s.lastBeat?' · beat '+ago(s.lastBeat)+' ago':'')+((s.wants&&s.wants.need)?' · 💡 would help (optional): '+s.wants.need:''); actions='<button class="srelay stop" data-id="'+esc(s.id)+'">Stop relay</button>'; }
-    return '<div class="extcard"><div class="top"><span class="name">'+esc(s.title||s.id)+'</span><span class="badge '+st.cls+'">'+esc(st.label)+'</span><button class="close sdel" data-id="'+esc(s.id)+'" aria-label="remove relay">✕</button></div><div class="meta">'+esc(line)+'</div>'+actions+'</div>';
+    // The beat note goes ABOVE the meta line and in ink, not dim: on a multi-day relay it is the
+    // only thing on the card that says what is actually happening. Everything else is liveness.
+    const note = (s.note && s.note.text) ? '<div class="snote">'+esc(s.note.text)+'</div>' : '';
+    return '<div class="extcard"><div class="top"><span class="name">'+esc(s.title||s.id)+'</span><span class="badge '+st.cls+'">'+esc(st.label)+'</span><button class="close sdel" data-id="'+esc(s.id)+'" aria-label="remove relay">✕</button></div>'+note+'<div class="meta">'+esc(line)+'</div>'+actions+'</div>';
   }).join('');
 }
 function render(agents){
