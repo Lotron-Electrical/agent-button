@@ -79,6 +79,11 @@
   .empty a{color:var(--accent2)}
   .seclabel{font-size:11px; color:var(--dim); letter-spacing:.6px; text-transform:uppercase; margin:20px 4px 10px; border-top:1px solid var(--line); padding-top:14px}
   .extcard{background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:14px; margin-bottom:12px}
+  /* finished relays fold under one tappable line */
+  details.past summary{cursor:pointer; list-style:none; display:flex; align-items:center; gap:8px; -webkit-tap-highlight-color:transparent}
+  details.past summary::-webkit-details-marker{display:none}
+  details.past summary::before{content:'▸'; color:var(--accent2); font-size:12px}
+  details.past[open] summary::before{content:'▾'}
   .extlink{display:block; text-align:center; padding:11px; border-radius:11px; font-size:14px; font-weight:600; color:var(--accent2); border:1px solid var(--line); background:var(--panel2); text-decoration:none}
   .srelay{display:block; width:100%; margin-top:10px; padding:11px; border-radius:11px; font:inherit; font-size:14px; font-weight:600; cursor:pointer; border:1px solid var(--line); background:var(--panel2); text-align:center}
   .srelay.stop{color:var(--err)} .srelay.cont{color:var(--accent2)}
@@ -104,10 +109,12 @@
   </header>
   <div class="stats" id="stats" style="display:none"></div>
   <div class="sub" id="sub">loading…</div>
-  <div id="solveswrap"></div>
-  <div id="list"></div>
-  <div class="seclabel" id="extlabel" style="display:none">Other live agents on this PC</div>
+  <!-- Chats first: the terminal agents and in-app agents are what Lloyd opens this page to talk
+       to. Solve relays are history most of the time, so they sit underneath. -->
+  <div class="seclabel" id="extlabel" style="display:none;margin-top:4px;border-top:none;padding-top:0">Terminal agents · tap to chat</div>
   <div id="ext"></div>
+  <div id="list"></div>
+  <div id="solveswrap"></div>
   <div class="foot">tap an agent to chat · × to close · refreshes every 3s</div>
 
 <script>
@@ -199,7 +206,11 @@ $('ext').addEventListener('click', async (e) => {
 });
 function renderSolves(solves){
   if(!solves || !solves.length){ $('solveswrap').innerHTML=''; return; }
-  $('solveswrap').innerHTML = '<div class="seclabel" style="margin-top:4px;border-top:none;padding-top:0">Solve relays · never give up</div>' + solves.map(s=>{
+  // Only a relay that is still working earns a card up here. Solved and stopped ones are
+  // history: keep them reachable (Resume, remove) but folded away under one line.
+  const live = solves.filter(s => s.status!=='solved' && s.status!=='stopped');
+  const past = solves.filter(s => s.status==='solved' || s.status==='stopped');
+  const card = (s)=>{
     const gen = (s.dispatch?'⚡ lean · ':'')+'∞ generation '+(s.generation||1);
     let st, line, actions='';
     if(s.status==='solved'){ st={label:'solved',cls:'idle'}; line=gen+(s.summary?' · '+s.summary:''); }
@@ -209,10 +220,16 @@ function renderSolves(solves){
     // only thing on the card that says what is actually happening. Everything else is liveness.
     const note = (s.note && s.note.text) ? '<div class="snote">'+esc(s.note.text)+'</div>' : '';
     return '<div class="extcard"><div class="top"><span class="name">'+esc(s.title||s.id)+'</span><span class="badge '+st.cls+'">'+esc(st.label)+'</span><button class="close sdel" data-id="'+esc(s.id)+'" aria-label="remove relay">✕</button></div>'+note+'<div class="meta">'+esc(line)+'</div>'+actions+'</div>';
-  }).join('');
+  };
+  // Remember whether the past list was open, so the 3s refresh does not snap it shut.
+  const wasOpen = !!(document.getElementById('pastsolves') && document.getElementById('pastsolves').open);
+  $('solveswrap').innerHTML =
+    (live.length ? '<div class="seclabel">Solve relays · working now</div>' + live.map(card).join('') : '') +
+    (past.length ? '<details id="pastsolves" class="past"'+(wasOpen?' open':'')+'><summary class="seclabel">Past relays · '+past.length+' solved or stopped</summary>'+past.map(card).join('')+'</details>' : '');
 }
-function render(agents){
-  if(!agents.length){ $('list').innerHTML = '<div class="empty">No agents yet.<br>Start one and chat with it right here.<br><a href="'+START+'">New agent →</a></div>'; return; }
+function render(agents, hasExternal){
+  // The empty card is only honest when there is nothing to talk to at all.
+  if(!agents.length){ $('list').innerHTML = hasExternal ? '' : '<div class="empty">No agents yet.<br>Start one and chat with it right here.<br><a href="'+START+'">New agent →</a></div>'; return; }
   $('list').innerHTML = agents.map(a => {
     const st = statusInfo(a.status);
     const endlessTag = a.mode==='endless' ? ('∞ endless'+(a.status==='thinking'?' · turn '+(a.turns||0):'')) : '';
@@ -262,12 +279,16 @@ async function refresh(){
   try { data = await (await api('/agents')).json(); }
   catch(e){ $('sub').textContent = 'can’t reach relay'; return; }
   const agents = data.agents || [];
-  const working = agents.filter(a => (a.status==='thinking'||a.status==='busy')).length;
+  const external = data.external || [];
+  // The count covers everything on the page you can talk to, terminal tabs included.
+  const total = agents.length + external.length;
+  const working = agents.filter(a => (a.status==='thinking'||a.status==='busy')).length
+                + external.filter(a => (a.status==='busy'||a.status==='thinking')).length;
   renderStats(data.stats);
-  $('sub').innerHTML = agents.length+' agent'+(agents.length===1?'':'s')+(working?' · '+working+' working':'');
-  render(agents);
+  $('sub').innerHTML = total+' agent'+(total===1?'':'s')+(working?' · '+working+' working':'');
+  renderExternal(external, data.rcarm || {});
+  render(agents, external.length > 0);
   renderSolves(data.solves || []);
-  renderExternal(data.external || [], data.rcarm || {});
 }
 refresh();
 setInterval(refresh, 3000);

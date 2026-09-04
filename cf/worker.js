@@ -129,22 +129,22 @@ export default {
     // button page (capability URL)
     if (SECRET && p === '/p/' + SECRET) {
       const html = HTML.replaceAll('__SECRET__', SECRET).replaceAll('__START__', '/p/' + SECRET);
-      return new Response(html, { headers: { 'content-type': 'text/html;charset=utf-8' } });
+      return new Response(html, { headers: { 'content-type': 'text/html;charset=utf-8', 'cache-control': 'no-store' } });
     }
     // agent dashboard page (capability URL)
     if (SECRET && p === '/p/' + SECRET + '/agents') {
       const html = AGENTS.replaceAll('__SECRET__', SECRET).replaceAll('__START__', '/p/' + SECRET);
-      return new Response(html, { headers: { 'content-type': 'text/html;charset=utf-8' } });
+      return new Response(html, { headers: { 'content-type': 'text/html;charset=utf-8', 'cache-control': 'no-store' } });
     }
     // in-app chat page (capability URL)
     if (SECRET && p === '/p/' + SECRET + '/chat') {
       const html = CHAT.replaceAll('__SECRET__', SECRET).replaceAll('__START__', '/p/' + SECRET);
-      return new Response(html, { headers: { 'content-type': 'text/html;charset=utf-8' } });
+      return new Response(html, { headers: { 'content-type': 'text/html;charset=utf-8', 'cache-control': 'no-store' } });
     }
     // terminal-agent chat page: the same real agent the claude.ai Code tab talks to, over /rc/*
     if (SECRET && p === '/p/' + SECRET + '/rc') {
       const html = RCCHAT.replaceAll('__SECRET__', SECRET).replaceAll('__START__', '/p/' + SECRET);
-      return new Response(html, { headers: { 'content-type': 'text/html;charset=utf-8' } });
+      return new Response(html, { headers: { 'content-type': 'text/html;charset=utf-8', 'cache-control': 'no-store' } });
     }
     if (SECRET && p === '/p/' + SECRET + '/manifest.webmanifest') {
       return new Response(JSON.stringify({
