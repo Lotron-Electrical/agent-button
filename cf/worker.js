@@ -311,6 +311,23 @@ export default {
       return queueStub(env).fetch('https://do/rcoutnext', { method: 'POST' });
     }
 
+    // ---- remote-control ARMING: turn RC on for a terminal that has no bridge yet ----
+    // A tab whose Claude session was started without --remote-control has no bridgeSessionId,
+    // so nothing in this app can address it. Arming types `/rc <name>` into that tab (via the
+    // elevated rc-watchdog on the PC) and the session comes back with a bridge.
+    if (p === '/rc/arm' && method === 'POST') {                // phone: connect RC on this tab
+      if (!authed()) return json({ error: 'unauthorized' }, 401);
+      return queueStub(env).fetch('https://do/rcarm', { method: 'POST', body: await req.text() });
+    }
+    if (p === '/rc/armnext') {                                 // poller: drain queued arm requests
+      if (!authed()) return json({ error: 'unauthorized' }, 401);
+      return queueStub(env).fetch('https://do/rcarmnext', { method: 'POST' });
+    }
+    if (p === '/rc/armresult' && method === 'POST') {           // poller: report what the re-arm did
+      if (!authed()) return json({ error: 'unauthorized' }, 401);
+      return queueStub(env).fetch('https://do/rcarmresult', { method: 'POST', body: await req.text() });
+    }
+
     return new Response('not found', { status: 404 });
   }
 };
@@ -319,6 +336,21 @@ export default {
 const RC_CAP = 40;           // transcript messages kept per session (same ceiling as chatagents)
 const RC_SUB_TTL = 75000;    // a subscription outlives ~3 missed 25s long-polls, then expires
 const RC_WAIT_MS = 25000;    // long-poll hold. See the cost note on `rcget` before changing it.
+const RC_ARM_TTL = 10 * 60000;  // an arm outcome stays on the card for ten minutes, then clears
+
+// Keep the arm-state map small and self-expiring: it exists only to tell the dashboard what a
+// button press is doing right now, so a finished entry is dead weight after RC_ARM_TTL.
+function trimArm(st) {
+  const now = Date.now();
+  const out = {};
+  for (const k of Object.keys(st || {})) {
+    const v = st[k];
+    if (!v || !v.at) continue;
+    if (now - v.at > RC_ARM_TTL) continue;
+    out[k] = v;
+  }
+  return out;
+}
 
 // Strongly-consistent queue. One instance ('main') serializes all ops.
 export class QueueDO {
@@ -499,6 +531,7 @@ export class QueueDO {
         external: (await this.storage.get('external')) || [],
         externalTs: (await this.storage.get('externalTs')) || 0,
         solves: (await this.storage.get('solves')) || [],
+        rcarm: (await this.storage.get('rcarm')) || {},
         stats,
         ts: Date.now()
       });
@@ -511,6 +544,48 @@ export class QueueDO {
       const b = await request.json();
       await this.storage.put('external', b.external || []);
       await this.storage.put('externalTs', b.ts || Date.now());
+      return json({ ok: true });
+    }
+
+    // ---- remote-control arming ----
+    // `rcarmq` is the work queue the poller drains; `rcarm` is the per-tab state the dashboard
+    // renders (queued -> arming -> ok/fail), keyed by TAB TITLE because that is the only handle
+    // the app has on a session that has no bridge id yet.
+    if (op === 'rcarm') {
+      const b = await request.json();                       // {tab, name}
+      const tab = String(b.tab || '').trim();
+      if (!tab) return json({ error: 'tab required' }, 400);
+      const name = String(b.name || tab).trim().slice(0, 60);
+      const now = Date.now();
+      const q = (await this.storage.get('rcarmq')) || [];
+      // One outstanding request per tab: tapping twice must not type /rc twice.
+      if (!q.some((x) => x.tab === tab)) {
+        q.push({ id: crypto.randomUUID().slice(0, 8), tab, name, ts: now });
+        await this.storage.put('rcarmq', q.slice(-20));
+      }
+      const st = (await this.storage.get('rcarm')) || {};
+      st[tab] = { state: 'queued', at: now };
+      await this.storage.put('rcarm', trimArm(st));
+      this.wake('rcarm');
+      return json({ ok: true });
+    }
+    if (op === 'rcarmnext') {
+      const q = (await this.storage.get('rcarmq')) || [];
+      if (!q.length) return json({ items: [] });
+      await this.storage.put('rcarmq', []);
+      const st = (await this.storage.get('rcarm')) || {};
+      const now = Date.now();
+      for (const it of q) st[it.tab] = { state: 'arming', at: now };
+      await this.storage.put('rcarm', trimArm(st));
+      return json({ items: q });
+    }
+    if (op === 'rcarmresult') {
+      const b = await request.json();                       // {tab, ok, detail}
+      const tab = String(b.tab || '').trim();
+      if (!tab) return json({ error: 'tab required' }, 400);
+      const st = (await this.storage.get('rcarm')) || {};
+      st[tab] = { state: b.ok ? 'ok' : 'fail', at: Date.now(), detail: String(b.detail || '').slice(0, 200) };
+      await this.storage.put('rcarm', trimArm(st));
       return json({ ok: true });
     }
     if (op === 'jobnext') {

@@ -36,6 +36,14 @@
   .shost{font-size:11px; color:var(--dim); margin-top:6px; display:flex; align-items:center; gap:6px}
   .shost .live{width:7px;height:7px;border-radius:50%;background:var(--ok);box-shadow:0 0 8px var(--ok)}
   .shost.off{color:var(--err)} .shost.off .live{background:var(--err);box-shadow:0 0 8px var(--err)}
+  /* which Claude subscription these agents are burning */
+  .acct{margin-top:9px; padding-top:9px; border-top:1px solid var(--line); font-size:11px; color:var(--dim); line-height:1.6}
+  .acct .who{display:flex; align-items:center; gap:7px; flex-wrap:wrap}
+  .acct .pill{font-size:10px; font-weight:600; letter-spacing:.5px; text-transform:uppercase;
+    color:var(--accent2); border:1px solid rgba(224,121,79,.45); background:rgba(224,121,79,.10); padding:2px 8px; border-radius:20px}
+  .acct .mail{color:var(--ink); overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+  .acct .plan{color:var(--dim)}
+  .acct .alt{margin-top:3px; opacity:.75}
   .sub{font-size:12px; color:var(--dim); margin:0 2px 14px; letter-spacing:.3px}
   /* cards */
   a.card{
@@ -73,6 +81,14 @@
   .srelay:active{filter:brightness(1.15)} .srelay[disabled]{opacity:.5}
   .extlink:active{border-color:var(--accent)}
   .extnochat{text-align:center; padding:8px; font-size:12px; color:var(--dim)}
+  /* "Connect RC": turn remote control on for a terminal that has no bridge yet */
+  .rcarm{display:block; width:100%; padding:11px; border-radius:11px; font:inherit; font-size:14px; font-weight:600;
+    cursor:pointer; text-align:center; color:var(--accent2); border:1px solid rgba(224,121,79,.45); background:rgba(224,121,79,.10)}
+  .rcarm:active{filter:brightness(1.2)}
+  .rcarm[disabled]{opacity:.65; cursor:default}
+  .rcarm.workin{color:var(--warn); border-color:rgba(217,168,79,.45); background:rgba(217,168,79,.10)}
+  .rcarm.bad{color:var(--err); border-color:rgba(217,101,90,.45); background:rgba(217,101,90,.10)}
+  .rcwhy{font-size:11px; color:var(--dim); text-align:center; margin-top:6px; line-height:1.45; overflow-wrap:anywhere}
   .foot{text-align:center; color:var(--dim); font-size:11px; margin-top:18px; opacity:.7}
 </style>
 </head>
@@ -111,10 +127,46 @@ function renderStats(st){
   el.innerHTML =
     '<div class="srow"><span class="lab">CPU</span><div class="bar"><i class="'+(cpu>85?'hot':'')+'" style="width:'+cpu+'%"></i></div><span class="val">'+cpu+'%'+(st.cores?' · '+st.cores+'c':'')+'</span></div>'+
     '<div class="srow"><span class="lab">RAM</span><div class="bar"><i class="'+(ram>88?'hot':'')+'" style="width:'+ram+'%"></i></div><span class="val">'+(st.ramUsedGB||0)+' / '+(st.ramTotalGB||0)+' GB</span></div>'+
-    '<div class="shost'+(fresh?'':' off')+'"><span class="live"></span>'+esc(st.host||'PC')+(fresh?' · online '+ago(st.ts)+' ago':' · last seen '+ago(st.ts)+' ago')+(st.uptimeH?' · up '+st.uptimeH+'h':'')+'</div>';
+    '<div class="shost'+(fresh?'':' off')+'"><span class="live"></span>'+esc(st.host||'PC')+(fresh?' · online '+ago(st.ts)+' ago':' · last seen '+ago(st.ts)+' ago')+(st.uptimeH?' · up '+st.uptimeH+'h':'')+'</div>'+
+    accountHtml(st.account);
 }
 
-function renderExternal(external){
+// Which Claude subscription every agent on this PC is signed in as. It matters because the PC
+// rotates between four captured accounts, and "why is it rate limited" is unanswerable from the
+// phone without knowing which one is live right now.
+function planLabel(a){
+  const plan = (a.plan||'').toLowerCase();
+  const nice = plan ? plan.charAt(0).toUpperCase()+plan.slice(1) : '';
+  // "default_claude_max_20x" -> "20x"
+  const m = /(\d+)\s*x/i.exec(a.tier||'');
+  return [nice, m ? m[1]+'x' : ''].filter(Boolean).join(' ');
+}
+function accountHtml(a){
+  if(!a || (!a.email && !a.plan)) return '';
+  const plan = planLabel(a);
+  const alt = (a.others||[]).map(o=>o.name).filter(Boolean);
+  return '<div class="acct"><div class="who">'+
+    (a.profile ? '<span class="pill">'+esc(a.profile)+'</span>' : '')+
+    '<span class="mail">'+esc(a.email||'unknown account')+'</span>'+
+    (plan ? '<span class="plan">· '+esc(plan)+'</span>' : '')+
+    '</div>'+
+    (alt.length ? '<div class="alt">also captured: '+esc(alt.join(', '))+'</div>' : '')+
+    '</div>';
+}
+
+// A terminal with no bridgeSessionId cannot be chatted with from anywhere — not here, not in
+// the Claude app. Rather than showing a dead card, offer the fix: arming types `/rc <name>`
+// into that tab on the PC and the session comes back with a bridge a few seconds later.
+function armHtml(name, arm){
+  const st = arm && arm.state;
+  if(st==='queued')  return '<button class="rcarm workin" disabled>connecting…</button>';
+  if(st==='arming')  return '<button class="rcarm workin" disabled>typing /rc in the tab…</button>';
+  if(st==='fail')    return '<button class="rcarm bad" data-tab="'+esc(name)+'">Retry remote control</button>'+
+                            (arm.detail ? '<div class="rcwhy">'+esc(arm.detail)+'</div>' : '');
+  if(st==='ok')      return '<button class="rcarm workin" disabled>connected · waiting for the bridge…</button>';
+  return '<button class="rcarm" data-tab="'+esc(name)+'">Connect remote control</button>';
+}
+function renderExternal(external, rcarm){
   if(!external || !external.length){ $('extlabel').style.display='none'; $('ext').innerHTML=''; return; }
   $('extlabel').style.display='block';
   $('ext').innerHTML = external.map(a => {
@@ -126,10 +178,21 @@ function renderExternal(external){
     const action = a.bridgeSessionId
       ? '<a class="chatbtn" href="'+START+'/rc?id='+encodeURIComponent(a.bridgeSessionId)+'&name='+encodeURIComponent(a.name||'')+'">Chat here ›</a>'
         + (a.chat ? claudeLink('extlink extsecond') : '')
-      : (a.chat ? claudeLink('extlink') : '<div class="extnochat">running · no chat link</div>');
+      : armHtml(a.name, (rcarm||{})[a.name]);
     return '<div class="extcard"><div class="top"><span class="name">'+esc(a.name)+'</span><span class="badge '+st.cls+'">'+esc(st.label)+'</span></div>'+(meta?'<div class="meta">'+esc(meta)+'</div>':'')+action+'</div>';
   }).join('');
 }
+
+$('ext').addEventListener('click', async (e) => {
+  const btn = e.target.closest('.rcarm');
+  if (!btn || btn.disabled) return;
+  const tab = btn.dataset.tab;
+  if (!tab) return;
+  btn.disabled = true; btn.className = 'rcarm workin'; btn.textContent = 'connecting…';
+  try { await api('/rc/arm', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ tab }) }); }
+  catch(err){ btn.className = 'rcarm bad'; btn.textContent = 'could not reach the relay'; return; }
+  refresh();
+});
 function renderSolves(solves){
   if(!solves || !solves.length){ $('solveswrap').innerHTML=''; return; }
   $('solveswrap').innerHTML = '<div class="seclabel" style="margin-top:4px;border-top:none;padding-top:0">Solve relays · never give up</div>' + solves.map(s=>{
@@ -200,7 +263,7 @@ async function refresh(){
   $('sub').innerHTML = agents.length+' agent'+(agents.length===1?'':'s')+(working?' · '+working+' working':'');
   render(agents);
   renderSolves(data.solves || []);
-  renderExternal(data.external || []);
+  renderExternal(data.external || [], data.rcarm || {});
 }
 refresh();
 setInterval(refresh, 3000);

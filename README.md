@@ -59,3 +59,38 @@ change `BUTTON_TOKEN` on Render and in `~/.agent-button.env`, then restart the p
 | `pc/run-poller.vbs` | Hidden launcher used by the scheduled task |
 
 Spawn prompts, done-flags and per-agent reports land in `~/.agent-button-spawns/`.
+
+## Remote control
+
+The dashboard (`/p/<secret>/agents`) can chat with a REAL terminal agent, not just the headless
+in-app ones. That needs the session to have a **bridge** (`bridgeSessionId` in
+`~/.claude/sessions/<pid>.json`), which only exists while Claude Code's remote control is
+connected. A tab started without `--remote-control` has none, so the card offers
+**Connect remote control** instead of a chat button.
+
+Pressing it walks this path:
+
+```
+phone ──POST /rc/arm{tab}──▶ relay ──WS wake──▶ poller ──req-<id>.json──▶ rc-watchdog (ELEVATED)
+                                                                              │
+   card shows Chat here ◀── /external ◀── poller ◀── res-<id>.json ◀── rc-rearm.ps1 types /rc
+```
+
+The file hop exists because the Claude tabs are spawned elevated and a medium-integrity process
+cannot send them a keystroke. The PC-side scripts are **outside this repo**, in `~/scripts/`:
+
+| Path | What |
+| --- | --- |
+| `~/scripts/rc-watchdog.js` | elevated daemon: re-arms dead bridges, services `~/.claude/logs/rc-arm/` |
+| `~/scripts/rc-rearm.ps1` | UIA + SendKeys `/rc <name>` into one Windows Terminal tab |
+| `~/scripts/wt-tabs.ps1` | lists WT tab titles (the handle the app arms by) |
+| `~/.claude/logs/rc-tabmap.json` | tab title -> {pid, sessionId}; the join the dashboard needs |
+
+`/rc <name>` connects the bridge but does **not** rename the session, and a session started
+without `--remote-control` has a derived name, so a tab title can never be matched to a session
+by name. `rc-tabmap.json` is how the two are paired: rc-rearm reads the session id off the pane
+(or the watchdog attributes the one bridge that changed) right after it types.
+
+The stats panel also shows which Claude subscription every agent is signed in as — the active
+`~/.claude/account-profiles/*` profile, its email and plan.
+

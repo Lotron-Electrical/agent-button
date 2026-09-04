@@ -418,10 +418,15 @@ async function pollSpawnOnce() {
     }
   }
 
+  // --new-window: every button agent gets its OWN WindowsTerminal.exe process. In WT each window
+  // is a separate process, so a tab added to an existing window shares that process's fate. On
+  // 2026-08-28 07:51 the one elevated window hosting Dense-5, Shopify 2-3 and Getgodmode went
+  // down during a spawn (box wedged by a C: defrag+VSS stall) and all three agents died at once.
+  // One window per agent means a wedge or close can only ever take that one agent.
   const launcher =
     'export PATH="' + pathDirs + ':$PATH"\n' +
     bq(CLAUDE_TAB) + ' --title ' + bq(s.name) + ' --remote-control ' + bq(s.name) +
-    ' --cwd ' + bq(cwdArg) + ' --no-auto-close' + scopeArgs +
+    ' --cwd ' + bq(cwdArg) + ' --no-auto-close --new-window' + scopeArgs +
     ' --prompt "$(cat ' + bq(toMsys(promptFile)) + ')"\n';
   try {
     fs.writeFileSync(promptFile, promptPrefix + String(s.prompt || ''));
@@ -446,10 +451,53 @@ function cpuPercent() {
   prevCpu = cur;
   return total > 0 ? Math.max(0, Math.min(100, Math.round(100 * (1 - idle / total)))) : 0;
 }
+// ---------- which Claude subscription is logged in ----------
+// Three files, none of them authoritative on its own:
+//   ~/.claude.json                     -> oauthAccount (email, display name, rate-limit tier)
+//   ~/.claude/.credentials.json        -> the live token's subscriptionType (max / pro / ...)
+//   ~/.claude/account-profiles/*.json  -> the captured profiles /swap-account rotates between,
+//                                         so the app can name the ACTIVE one ("lotron") rather
+//                                         than only showing an email.
+// Read cheaply and never throw: this is a nice-to-have on a telemetry push, not a dependency.
+const PROFILE_DIR = path.join(os.homedir(), '.claude', 'account-profiles');
+function readJson(p) { try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch (_) { return null; } }
+function readAccount() {
+  const main = readJson(path.join(os.homedir(), '.claude.json'));
+  const oa = (main && main.oauthAccount) || {};
+  const cred = readJson(path.join(os.homedir(), '.claude', '.credentials.json'));
+  const co = (cred && cred.claudeAiOauth) || {};
+  const email = oa.emailAddress || co.email || null;
+  if (!email && !co.subscriptionType) return null;
+  // Name the profile by matching the live email against the captured profiles.
+  let profile = null;
+  const others = [];
+  try {
+    for (const f of fs.readdirSync(PROFILE_DIR)) {
+      if (!f.endsWith('.json') || f.startsWith('.')) continue;
+      const j = readJson(path.join(PROFILE_DIR, f));
+      if (!j || !j.email) continue;
+      const nm = j.name || f.replace(/\.json$/, '');
+      if (email && j.email === email) profile = nm; else others.push({ name: nm, email: j.email });
+    }
+  } catch (_) {}
+  return {
+    email,
+    profile,                                   // e.g. "lotron" - null when it matches no capture
+    displayName: oa.displayName || oa.fullName || null,
+    plan: co.subscriptionType || null,         // "max" | "pro" | ...
+    tier: co.rateLimitTier || oa.organizationRateLimitTier || null, // "default_claude_max_20x"
+    org: oa.organizationName || null,
+    tokenExpiresAt: co.expiresAt || null,
+    others,                                    // the other captured profiles, for context
+    ts: Date.now()
+  };
+}
+
 async function reportStats() {
   const total = os.totalmem() / 1073741824, free = os.freemem() / 1073741824;
   const stats = {
     host: os.hostname(),
+    account: readAccount(),
     cpuPct: cpuPercent(),
     cores: os.cpus().length,
     ramUsedGB: +(total - free).toFixed(1),
@@ -492,17 +540,26 @@ async function reportExternal() {
     const names = await listAgentTabs();
     // enrich from the session registry where a live session matches the tab name
     const sess = {};
+    const byPid = {};
     try {
       const dir = path.join(os.homedir(), '.claude', 'sessions');
       for (const f of fs.readdirSync(dir).filter((x) => x.endsWith('.json'))) {
         let d; try { d = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')); } catch (_) { continue; }
         if (!d.pid || !alivePid(d.pid)) continue;
+        byPid[d.pid] = d;
         const nm = String(d.name || '').replace(/^claude-tab:/, '').replace(/_$/, '');
         if (nm) sess[nm] = d;
       }
     } catch (_) {}
+    // Second join key. A session started WITHOUT --remote-control keeps a derived name
+    // ("lloyd-gibbs-db") that will never equal its tab title, and `/rc <name>` connects the
+    // bridge without renaming it — so name matching alone leaves those cards permanently
+    // chat-less. rc-watchdog records the pairing it observes when it arms a tab; read it.
+    let tabmap = {};
+    try { tabmap = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.claude', 'logs', 'rc-tabmap.json'), 'utf8')); } catch (_) {}
     const external = names.map((name) => {
-      const d = sess[name];
+      const mapped = tabmap[name] && byPid[tabmap[name].pid];
+      const d = sess[name] || mapped;
       return {
         name,
         status: d && d.status ? d.status : 'live',
@@ -517,6 +574,61 @@ async function reportExternal() {
     });
     await fetch(RELAY + '/external', { method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify({ external, ts: Date.now() }) });
   } catch (_) {} finally { externalBusy = false; }
+}
+
+// ---------- remote-control arming ("Connect RC" in the app) ----------
+// Typing `/rc <name>` into a Claude tab needs UIA + SendKeys against that terminal window, and
+// the tabs are spawned ELEVATED (ClaudeCodeAdmin) — a medium-integrity process like this poller
+// literally cannot send them a keystroke. So the poller never touches the window: it drops a
+// request file that the ELEVATED rc-watchdog daemon (~/scripts/rc-watchdog.js) executes, and
+// waits for the result file it writes back.
+const RC_ARM_DIR = path.join(os.homedir(), '.claude', 'logs', 'rc-arm');
+const RC_ARM_TIMEOUT_MS = 150000;   // the daemon polls every few seconds; /rc itself takes ~10s
+const armInFlight = new Set();
+async function drainRcArm() {
+  let items = [];
+  try {
+    const r = await fetch(RELAY + '/rc/armnext', { headers });
+    if (!r.ok) return;
+    items = (await r.json()).items || [];
+  } catch (_) { return; }
+  for (const it of items) {
+    if (!it || !it.tab || armInFlight.has(it.tab)) continue;
+    armInFlight.add(it.tab);
+    runArm(it).finally(() => armInFlight.delete(it.tab));
+  }
+}
+async function runArm(it) {
+  const id = String(it.id || Date.now()).replace(/[^a-z0-9-]/gi, '');
+  const req = path.join(RC_ARM_DIR, 'req-' + id + '.json');
+  const res = path.join(RC_ARM_DIR, 'res-' + id + '.json');
+  let out = { ok: false, detail: 'no response from the RC daemon' };
+  try {
+    fs.mkdirSync(RC_ARM_DIR, { recursive: true });
+    fs.writeFileSync(req, JSON.stringify({ id, tab: it.tab, name: it.name || it.tab, ts: Date.now() }));
+    log('rc-arm: requested "' + it.tab + '" as "' + (it.name || it.tab) + '"');
+    const until = Date.now() + RC_ARM_TIMEOUT_MS;
+    while (Date.now() < until) {
+      await new Promise((r) => setTimeout(r, 1500));
+      if (!fs.existsSync(res)) continue;
+      const j = JSON.parse(fs.readFileSync(res, 'utf8'));
+      out = { ok: !!j.ok, detail: String(j.detail || '') };
+      break;
+    }
+  } catch (e) {
+    out = { ok: false, detail: e.message };
+  }
+  try { fs.unlinkSync(req); } catch (_) {}
+  try { fs.unlinkSync(res); } catch (_) {}
+  log('rc-arm: "' + it.tab + '" -> ' + (out.ok ? 'CONNECTED' : 'FAILED') + ' (' + out.detail + ')');
+  try {
+    await fetch(RELAY + '/rc/armresult', {
+      method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tab: it.tab, ok: out.ok, detail: out.detail })
+    });
+  } catch (_) {}
+  // Refresh the card straight away so the new bridge id shows without waiting for a nudge.
+  reportExternal();
 }
 
 // ---------- Solve-mode watchdog ----------
@@ -754,6 +866,7 @@ async function drainOnce(reason) {
     for (;;) { if (!(await pollSpawnOnce())) break; }                     // elevated terminal spawns (button / solve)
     while (chatInFlight < MAX_CHAT) { if (!(await tryStartChat())) break; } // in-app chat turns
     await drainRcOut(reason);                                             // messages typed at the in-app chat page
+    await drainRcArm();                                                   // "Connect RC" presses from the app
   } finally {
     draining = false;
     if (drainAgain) { drainAgain = false; setTimeout(() => drainOnce('again'), 50); }
@@ -833,6 +946,14 @@ function connect() {
   sock.addEventListener('close', () => { stopKeepalive(); scheduleReconnect(); });
   sock.addEventListener('error', () => { try { sock.close(); } catch (_) {} });
 }
+
+// A death here is invisible from the outside: the scheduled task launched us through a
+// wrapper that returned immediately, so nothing supervises the process. Whatever kills us
+// gets written to poller.log first, so the next look at "why did the button stop working"
+// starts with a reason instead of a log that just stops mid-sentence.
+process.on('uncaughtException', (e) => { log('FATAL uncaughtException: ' + (e && e.stack || e)); process.exit(1); });
+process.on('unhandledRejection', (e) => { log('FATAL unhandledRejection: ' + (e && e.stack || e)); process.exit(1); });
+process.on('exit', (code) => { log('poller exiting (code ' + code + ')'); });
 
 log('poller starting (push mode) -> ' + RELAY + ' (default cwd ' + DEFAULT_CWD + ')');
 connect();
