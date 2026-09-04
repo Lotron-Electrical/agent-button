@@ -32,13 +32,17 @@
   .srow .bar{flex:1; height:8px; background:var(--panel2); border-radius:6px; overflow:hidden}
   .srow .bar i{display:block; height:100%; border-radius:6px; background:linear-gradient(90deg,var(--accent2),var(--accent)); transition:width .4s}
   .srow .bar i.hot{background:linear-gradient(90deg,#d9a84f,#d9655a)}
-  .srow .val{width:96px; text-align:right; color:var(--ink)}
+  /* Sized by content, never wrapped: a fixed 96px broke "12.9 / 31.9 GB" onto two lines on the
+     phone the moment the numbers grew a digit. The bar is the flexible part; the number is not. */
+  .srow .val{flex:none; min-width:96px; text-align:right; color:var(--ink); white-space:nowrap}
   .shost{font-size:11px; color:var(--dim); margin-top:6px; display:flex; align-items:center; gap:6px}
   .shost .live{width:7px;height:7px;border-radius:50%;background:var(--ok);box-shadow:0 0 8px var(--ok)}
   .shost.off{color:var(--err)} .shost.off .live{background:var(--err);box-shadow:0 0 8px var(--err)}
   /* which Claude subscription these agents are burning */
   .acct{margin-top:9px; padding-top:9px; border-top:1px solid var(--line); font-size:11px; color:var(--dim); line-height:1.6}
-  .acct .who{display:flex; align-items:center; gap:7px; flex-wrap:wrap}
+  .acct .who{display:flex; align-items:center; gap:7px; flex-wrap:nowrap}
+  .acct .pill, .acct .plan{flex:none; white-space:nowrap}
+  .acct .mail{flex:1; min-width:0}
   .acct .pill{font-size:10px; font-weight:600; letter-spacing:.5px; text-transform:uppercase;
     color:var(--accent2); border:1px solid rgba(224,121,79,.45); background:rgba(224,121,79,.10); padding:2px 8px; border-radius:20px}
   .acct .mail{color:var(--ink); overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
