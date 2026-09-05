@@ -123,6 +123,16 @@
   .stats.compact{padding:8px 12px}
   .stats.compact .srow{margin:4px 0; font-size:11px}
   .stats.compact .shost{margin-top:4px}
+  /* swipeable strip: three panes, native scroll-snap, dots in the corner */
+  .stats.compact{position:relative; padding-bottom:10px}
+  .strack{display:flex; overflow-x:auto; scroll-snap-type:x mandatory; scrollbar-width:none; -webkit-overflow-scrolling:touch}
+  .strack::-webkit-scrollbar{display:none}
+  .spane{flex:0 0 100%; scroll-snap-align:start; min-width:100%}
+  .sdots{position:absolute; right:12px; bottom:4px; display:flex; gap:5px}
+  .sdots i{width:5px; height:5px; border-radius:50%; background:var(--line)}
+  .sdots i.on{background:var(--accent2)}
+  .stats.compact .val small{font-size:9px; color:var(--dim)}
+  .stats.compact .unote{font-size:11px; color:var(--dim); padding:14px 0}
   /* two gauges per row: label | bar | value, twice */
   .srow.two{gap:14px}
   .srow.two .g{flex:1; min-width:0; display:flex; align-items:center; gap:6px}
@@ -144,9 +154,13 @@
         background:linear-gradient(100deg, var(--panel) 30%, #202020 50%, var(--panel) 70%); background-size:200% 100%;
         animation:shimmer 1.4s linear infinite}
   .skel.row{height:8px; border-radius:6px; flex:1}
-  .tile{animation:rise .28s ease-out both}
-  .tile:nth-child(2){animation-delay:.04s} .tile:nth-child(3){animation-delay:.08s} .tile:nth-child(4){animation-delay:.12s}
-  .tile:nth-child(5){animation-delay:.16s} .tile:nth-child(6){animation-delay:.20s} .tile:nth-child(n+7){animation-delay:.24s}
+  /* The rise-in plays on the FIRST paint only. Later redraws (a status change, a layout switch,
+     a page swipe) swap the tiles in place with no animation, so nothing flashes. */
+  body.firstpaint .tile{animation:rise .28s ease-out both}
+  body.firstpaint .tile:nth-child(2){animation-delay:.04s} body.firstpaint .tile:nth-child(3){animation-delay:.08s} body.firstpaint .tile:nth-child(4){animation-delay:.12s}
+  body.firstpaint .tile:nth-child(5){animation-delay:.16s} body.firstpaint .tile:nth-child(6){animation-delay:.20s} body.firstpaint .tile:nth-child(n+7){animation-delay:.24s}
+  .tile{transition:border-color .25s, background-color .25s}
+  body.gridview #ext{transition:grid-template-columns .2s}
   /* tile editor */
   .tile .pin{position:absolute; top:6px; left:10px; color:var(--warn); font-size:14px}
   #editor{position:fixed; inset:0; z-index:60; background:rgba(0,0,0,.6); display:flex; align-items:flex-end; justify-content:center; padding:16px}
@@ -267,11 +281,14 @@ function renderStats(st, compact){
     // Same three lines of height as before, twice the information: each row holds two gauges.
     //   CPU | GPU      RAM | VRAM      C: | E:
     // Host and uptime move up into the page title so they cost no row at all.
-    el.innerHTML = compactStatsHtml(st);
+    // Swipe the strip sideways for the next panes: the connected account's limits, then tokens.
+    const html = stripHtml(st);
+    if (html !== null) el.innerHTML = html;
     const fresh = (Date.now()-st.ts) < 20000;
     const sub = document.querySelector('h1 span');
     // Host only: with the layout and New buttons alongside, uptime made the title wrap.
     if (sub) sub.textContent = '// '+(st.host||'PC')+(fresh?'':' · offline');
+    keepStripPane();
     return;
   }
   const fresh = (Date.now()-st.ts) < 20000;
@@ -298,6 +315,50 @@ function compactStatsHtml(st){
   if (d.length) rows.push(d.slice(0,2).map(x => gauge(x.letter+':', x.pct, gb(x.totalGB - x.freeGB)+'/'+gb(x.totalGB), 90)).join(''));
   return rows.map(r => '<div class="srow two">'+r+'</div>').join('');
 }
+
+// The strip is three swipeable panes of equal height (CSS scroll-snap does the swiping):
+//   1. PC gauges   2. the connected account's rate-limit windows   3. token counts + burn
+// Rebuilding it every 3s would snap the user back to pane 1, so the scroll position is kept.
+function limitsPaneHtml(u){
+  const a = u && u.accounts && u.accounts.find(x => x.active);
+  if (!a) return '<div class="srow two"><span class="unote">no limit data</span></div>';
+  const L = {}; for (const l of (a.limits||[])) L[l.kind] = l;
+  const g = (lab, l, hot) => l ? gauge(lab, l.percent, (l.percent==null?'–':l.percent+'%')+(l.resetsAt?' <small>'+until(l.resetsAt)+'</small>':''), hot||85) : gauge(lab, 0, '–');
+  const cx = u.codex && (u.codex.limits||[]).find(l => l.windowMinutes >= 10000) || (u.codex && u.codex.limits && u.codex.limits[0]);
+  return '<div class="srow two">'+g('5h', L.session)+g('7d', L.weekly_all)+'</div>'+
+         '<div class="srow two">'+g('Opus', L.weekly_scoped)+(cx ? gauge('Codex', cx.percent, cx.percent+'%'+(cx.resetsAt?' <small>'+until(cx.resetsAt)+'</small>':'')) : '<span class="g"></span>')+'</div>'+
+         '<div class="srow two"><span class="g"><span class="lab">acct</span><span class="val">'+esc(a.name||a.email||'')+'</span></span>'+
+           '<span class="g"><span class="lab">burn</span><span class="val">'+fmtTok(a.burnPerMin||0)+'/min</span></span></div>';
+}
+function tokensPaneHtml(u){
+  const t = u && u.tokens;
+  if (!t) return '<div class="srow two"><span class="unote">no token data</span></div>';
+  const cell = (lab, v) => '<span class="g"><span class="lab">'+lab+'</span><span class="val">'+(v ? fmtTok(v.in+v.out) : '–')+(v ? ' <small>'+fmtTok(v.out)+' out</small>' : '')+'</span></span>';
+  return '<div class="srow two">'+cell('5h', t.fiveHour)+cell('today', t.today)+'</div>'+
+         '<div class="srow two">'+cell('week', t.week)+'<span class="g"><span class="lab">burn</span><span class="val">'+fmtTok(t.burnPerMin||0)+'/min</span></span></div>'+
+         '<div class="srow two"><span class="g"><span class="lab">cache</span><span class="val">'+(t.today ? fmtTok(t.today.cacheRead) : '–')+' <small>read today</small></span></span><span class="g"></span></div>';
+}
+function stripHtml(st){
+  // The track is built ONCE and its panes are refreshed in place afterwards: replacing the track
+  // would reset the swipe position and blink the whole strip every 3s.
+  const panes = [compactStatsHtml(st), limitsPaneHtml(st.usage), tokensPaneHtml(st.usage)];
+  const tr = document.getElementById('strack');
+  if (tr && tr.children.length === 3) {
+    panes.forEach((h, i) => { if (tr.children[i].innerHTML !== h) tr.children[i].innerHTML = h; });
+    return null;                                            // caller leaves the DOM alone
+  }
+  return '<div class="strack" id="strack">'+panes.map(h => '<div class="spane">'+h+'</div>').join('')+
+         '</div><div class="sdots"><i class="on"></i><i></i><i></i></div>';
+}
+// keep the pane the user swiped to across refreshes, and light the matching dot
+let stripPane = 0;
+function keepStripPane(){
+  const tr = document.getElementById('strack'); if (!tr) return;
+  tr.scrollLeft = stripPane * tr.clientWidth;
+  tr.onscroll = () => { const p = Math.round(tr.scrollLeft / Math.max(1, tr.clientWidth)); if (p !== stripPane) { stripPane = p; lightDots(); } };
+  lightDots();
+}
+function lightDots(){ document.querySelectorAll('.sdots i').forEach((d, i) => d.classList.toggle('on', i === stripPane)); }
 
 // Which Claude subscription every agent on this PC is signed in as. It matters because the PC
 // rotates between four captured accounts, and "why is it rate limited" is unanswerable from the
@@ -406,7 +467,8 @@ function applyLayout(){
 $('layoutbtn').addEventListener('click', () => {
   layoutIdx = (layoutIdx + 1) % LAYOUTS.length;
   try { localStorage.setItem('agents.layout', String(layoutIdx)); } catch(_){}
-  page = 0; applyLayout(); refresh();
+  // Re-slice what is already on screen right now; no network round trip, no blank frame.
+  page = 0; applyLayout(); drawPage();
 });
 if (VIEW === 'agents') {
   $('layoutbtn').hidden = false; applyLayout();
@@ -429,7 +491,25 @@ function drawPage(){
   // Only touch the DOM when something changed: the 3s refresh must not re-run the fade-in or
   // steal a tap that was mid-press on a tile.
   const html = lastTiles.slice(page * per, (page + 1) * per).join('');
-  if (html !== lastDrawn) { $('ext').innerHTML = html; lastDrawn = html; }
+  if (html !== lastDrawn) {
+    const first = !lastDrawn;
+    if (first) document.body.classList.add('firstpaint');
+    // FLIP: remember where each tile was, swap the DOM, then slide every surviving tile from its
+    // old spot to its new one. A reorder (priority change, an agent starting work) glides
+    // instead of snapping; a brand-new tile fades in; nothing flashes.
+    const before = new Map();
+    if (!first) for (const t of $('ext').querySelectorAll('.tile[data-key]')) before.set(t.dataset.key, t.getBoundingClientRect());
+    $('ext').innerHTML = html; lastDrawn = html;
+    if (first) { setTimeout(() => document.body.classList.remove('firstpaint'), 600); }
+    else {
+      for (const t of $('ext').querySelectorAll('.tile[data-key]')) {
+        const was = before.get(t.dataset.key), now = t.getBoundingClientRect();
+        if (!was) { t.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 220, easing: 'ease-out' }); continue; }
+        const dx = was.left - now.left, dy = was.top - now.top;
+        if (dx || dy) t.animate([{ transform: 'translate('+dx+'px,'+dy+'px)' }, { transform: 'none' }], { duration: 320, easing: 'cubic-bezier(.2,.7,.2,1)' });
+      }
+    }
+  }
   $('pager').innerHTML = pages > 1
     ? '<button class="parrow" data-go="-1"'+(page===0?' disabled':'')+'>‹</button>'
       + Array.from({length: pages}, (_, i) => '<button class="pdot'+(i===page?' on':'')+'" data-page="'+i+'" aria-label="page '+(i+1)+'"></button>').join('')
@@ -460,7 +540,7 @@ function renderGrid(external, agents, rcarm){
     const label = shown(a);
     const pr = prioOf(a);
     const inner = '<span class="rcdot"></span>'+(pr===2?'<span class="pin">★</span>':'')+'<span class="tname">'+esc(label)+'</span><span class="tstate">'+esc(t.word)+'</span>';
-    const keyAttr = ' data-key="'+esc(aliasKey(a))+'" data-label="'+esc(label)+'" data-prio="'+pr+'"'+(pr===0?' style="opacity:.75"':'');
+    const keyAttr = ' data-key="'+esc(aliasKey(a))+'" data-label="'+esc(label)+'" data-prio="'+pr+'" data-tabname="'+esc(a.name)+'"'+(pr===0?' style="opacity:.75"':'');
     if (t.act==='chat') {
       const url = START+'/rc?id='+encodeURIComponent(a.bridgeSessionId)+'&name='+encodeURIComponent(label);
       return '<a class="tile openchat '+t.cls+'" href="'+url+'" data-name="'+esc(label)+'"'+keyAttr+'>'+inner+'</a>';
@@ -538,9 +618,10 @@ function armPress(el){ clearTimeout(pressTimer); pressed = el; renamed = false; 
 function cancelPress(){ clearTimeout(pressTimer); pressTimer = null; }
 // Long-press opens a small editor: the agent's name and its priority (High / Normal / Low).
 // High sits first on the grid, Low last and dimmed.
-let editKey = null;
+let editKey = null, editTab = null;
 function renameTile(el){
   editKey = el.dataset.key; if (!editKey) return;
+  editTab = el.dataset.tabname || null;      // the real terminal tab, so the session itself is renamed too
   $('edname').value = el.dataset.label || '';
   setPrio(+el.dataset.prio || 1);
   $('editor').hidden = false;
@@ -555,7 +636,10 @@ $('editor').addEventListener('click', async (e) => {
   ALIASES[editKey] = { name, prio };
   $('editor').hidden = true;
   refresh();
-  try { await api('/alias', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ key: editKey, name, prio }) }); } catch(_){}
+  // The alias shows at once; the terminal session is renamed too (typed /rename on the PC), so the
+  // name in Claude Code and on claude.ai matches what you see here.
+  const changed = name && name !== (ALIASES[editKey] && ALIASES[editKey].name) ;
+  try { await api('/alias', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ key: editKey, name, prio, rename: !!(changed && editTab), tab: editTab }) }); } catch(_){}
 });
 $('edname').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); $('edsave').click(); } });
 $('ext').addEventListener('pointerdown', (e) => { const t = e.target.closest('.tile'); if (t && t.dataset.key) armPress(t); });

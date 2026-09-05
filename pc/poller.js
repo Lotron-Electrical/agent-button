@@ -522,9 +522,24 @@ async function readUsage() {
       codex: j.codex ? { planType: j.codex.planType || null, ageSec: j.codex.ageSec, limits: (j.codex.limits || []).map((l) => ({ kind: l.kind, percent: Math.round(l.usedPercent), windowMinutes: l.windowMinutes, resetsAt: l.resetsAt ? l.resetsAt * 1000 : null })) } : null,
       ts: Date.now()
     };
-  } catch (_) { val = null; }
+  } catch (_) { val = null; reviveWidget(); }
   usageCache = { at: Date.now(), val };
   return val;
+}
+// The widget's own launcher ties the server to a Chrome window and takes the server down with
+// it. The phone does not need the window, only port 7789, so when /data is unreachable start
+// server.js on its own: hidden, detached, at most once a minute.
+const WIDGET_DIR = path.join(os.homedir(), 'scripts', 'claude-usage-widget');
+let widgetRevivedAt = 0;
+function reviveWidget() {
+  if (Date.now() - widgetRevivedAt < 60000) return;
+  widgetRevivedAt = Date.now();
+  if (!fs.existsSync(path.join(WIDGET_DIR, 'server.js'))) return;
+  try {
+    const child = spawn(process.execPath, ['server.js'], { cwd: WIDGET_DIR, detached: true, stdio: 'ignore', windowsHide: true, env: SPAWN_ENV });
+    child.unref();
+    log('usage widget server was down; started node server.js (pid ' + child.pid + ')');
+  } catch (e) { log('usage widget revive failed: ' + e.message); }
 }
 
 // ---------- GPU (nvidia-smi) and drive space ----------
@@ -675,8 +690,8 @@ async function runArm(it) {
   let out = { ok: false, detail: 'no response from the RC daemon' };
   try {
     fs.mkdirSync(RC_ARM_DIR, { recursive: true });
-    fs.writeFileSync(req, JSON.stringify({ id, tab: it.tab, name: it.name || it.tab, ts: Date.now() }));
-    log('rc-arm: requested "' + it.tab + '" as "' + (it.name || it.tab) + '"');
+    fs.writeFileSync(req, JSON.stringify({ id, tab: it.tab, name: it.name || it.tab, cmd: it.cmd || null, ts: Date.now() }));
+    log((it.cmd === 'rename' ? 'rc-rename: ' : 'rc-arm: ') + 'requested "' + it.tab + '" as "' + (it.name || it.tab) + '"');
     const until = Date.now() + RC_ARM_TIMEOUT_MS;
     while (Date.now() < until) {
       await new Promise((r) => setTimeout(r, 1500));
@@ -694,7 +709,7 @@ async function runArm(it) {
   try {
     await fetch(RELAY + '/rc/armresult', {
       method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ tab: it.tab, ok: out.ok, detail: out.detail })
+      body: JSON.stringify({ tab: it.tab, ok: out.ok, detail: out.detail, cmd: it.cmd || undefined })
     });
   } catch (_) {}
   // Refresh the card straight away so the new bridge id shows without waiting for a nudge.

@@ -596,7 +596,7 @@ export class QueueDO {
       await this.storage.put('rcarmq', []);
       const st = (await this.storage.get('rcarm')) || {};
       const now = Date.now();
-      for (const it of q) st[it.tab] = { state: 'arming', at: now };
+      for (const it of q) if (!it.cmd) st[it.tab] = { state: 'arming', at: now };
       await this.storage.put('rcarm', trimArm(st));
       return json({ items: q });
     }
@@ -611,15 +611,24 @@ export class QueueDO {
       const cur = typeof al[key] === 'string' ? { name: al[key] } : (al[key] || {});
       const next = { name: b.name === undefined ? (cur.name || '') : name, prio: prio === null ? (cur.prio == null ? 1 : cur.prio) : prio };
       if (!next.name && next.prio === 1) delete al[key]; else al[key] = next;
+      // `rename:true` + `tab`: also rename the SESSION itself. Rides the arm queue as a
+      // cmd item; no per-tab arm state is written for it, so the tile does not say 'connecting'.
+      if (b.rename === true && b.tab && name) {
+        const q = (await this.storage.get('rcarmq')) || [];
+        q.push({ id: crypto.randomUUID().slice(0, 8), tab: String(b.tab).trim(), name, cmd: 'rename', ts: Date.now() });
+        await this.storage.put('rcarmq', q.slice(-20));
+        this.wake('rcarm');
+      }
       // Cap the map: a key whose agent is long gone is dead weight, and 200 renames is plenty.
       const keys = Object.keys(al); if (keys.length > 200) for (const k of keys.slice(0, keys.length - 200)) delete al[k];
       await this.storage.put('aliases', al);
       return json({ ok: true });
     }
     if (op === 'rcarmresult') {
-      const b = await request.json();                       // {tab, ok, detail}
+      const b = await request.json();                       // {tab, ok, detail, cmd?}
       const tab = String(b.tab || '').trim();
       if (!tab) return json({ error: 'tab required' }, 400);
+      if (b.cmd) return json({ ok: true });                 // a typed command, not an arm: nothing to show
       const st = (await this.storage.get('rcarm')) || {};
       st[tab] = { state: b.ok ? 'ok' : 'fail', at: Date.now(), detail: String(b.detail || '').slice(0, 200) };
       await this.storage.put('rcarm', trimArm(st));
