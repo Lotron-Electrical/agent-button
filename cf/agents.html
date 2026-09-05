@@ -123,8 +123,19 @@
   .stats.compact{padding:8px 12px}
   .stats.compact .srow{margin:3px 0}
   .stats.compact .shost{margin-top:4px}
-  body.gridview #ext{flex:1; min-height:0; display:grid; grid-template-columns:1fr 1fr; grid-auto-rows:1fr; gap:12px; padding:4px 0}
+  /* Fixed page: cols x rows tiles, every one on screen. More agents than that = more pages,
+     swiped or tapped through with the dots. The layout is the user's choice (header button). */
+  body.gridview #ext{flex:1; min-height:0; display:grid; grid-template-columns:repeat(var(--cols,2),1fr); grid-template-rows:repeat(var(--rows,3),1fr); gap:12px; padding:4px 0; touch-action:pan-y}
   body.gridview #ext:empty{display:none}
+  body.gridview[data-cols="3"] .tile .tname{font-size:12px}
+  body.gridview[data-cols="3"] .tile{padding:8px; gap:5px}
+  .layoutbtn{font:inherit; cursor:pointer; background:none}
+  .pager{flex:none; display:flex; justify-content:center; align-items:center; gap:10px; padding:10px 0 2px}
+  .pager:empty{display:none}
+  .pdot{width:8px; height:8px; border-radius:50%; background:var(--line); border:0; padding:0}
+  .pdot.on{background:var(--accent2); box-shadow:0 0 8px var(--accent2)}
+  .parrow{font:inherit; font-size:18px; line-height:1; color:var(--accent2); background:var(--panel); border:1px solid var(--line); border-radius:9px; width:40px; height:30px}
+  .parrow[disabled]{opacity:.3}
   .tile{position:relative; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:8px; text-align:center;
         border-radius:16px; border:1px solid var(--line); background:var(--panel); color:var(--ink); text-decoration:none;
         padding:12px; min-height:0; overflow:hidden; font:inherit; cursor:pointer; -webkit-tap-highlight-color:transparent}
@@ -167,6 +178,7 @@
   <header>
     <div class="dot"></div>
     <h1><a id="hometitle" href="__START__" style="color:inherit;text-decoration:none">AGENTS</a> <span>// your PC</span></h1>
+    <button class="spawnlink layoutbtn" id="layoutbtn" type="button" hidden title="tiles per page">2×3</button>
     <a class="spawnlink" href="__START__/new">+ New</a>
   </header>
   <div class="stats" id="stats" style="display:none"></div>
@@ -175,6 +187,7 @@
        to. Solve relays are history most of the time, so they sit underneath. -->
   <div class="seclabel" id="extlabel" style="display:none;margin-top:4px;border-top:none;padding-top:0">Terminal agents · tap to chat</div>
   <div id="ext"></div>
+  <div class="pager" id="pager"></div>
   <div id="list"></div>
   <div id="solveswrap"></div>
   <div id="sheet" aria-hidden="true">
@@ -316,6 +329,52 @@ function tileState(a, arm){
 let ALIASES = {};
 const aliasKey = (a) => a.bridgeSessionId || ('tab:' + a.name);
 const shown = (a) => ALIASES[aliasKey(a)] || a.name;
+// ---- page layout: how many tiles fit on one screen, and paging through the rest ----
+const LAYOUTS = [[2,2],[2,3],[3,3],[2,4]];        // [cols, rows]
+let layoutIdx = 1;
+try { const v = parseInt(localStorage.getItem('agents.layout'), 10); if (v >= 0 && v < LAYOUTS.length) layoutIdx = v; } catch(_){}
+let page = 0;
+function applyLayout(){
+  const [c, r] = LAYOUTS[layoutIdx];
+  document.body.style.setProperty('--cols', c);
+  document.body.style.setProperty('--rows', r);
+  document.body.dataset.cols = c;
+  $('layoutbtn').textContent = c + '×' + r;
+}
+$('layoutbtn').addEventListener('click', () => {
+  layoutIdx = (layoutIdx + 1) % LAYOUTS.length;
+  try { localStorage.setItem('agents.layout', String(layoutIdx)); } catch(_){}
+  page = 0; applyLayout(); refresh();
+});
+if (VIEW === 'agents') { $('layoutbtn').hidden = false; applyLayout(); }
+let lastTiles = [];
+function drawPage(){
+  const per = LAYOUTS[layoutIdx][0] * LAYOUTS[layoutIdx][1];
+  const pages = Math.max(1, Math.ceil(lastTiles.length / per));
+  if (page > pages - 1) page = pages - 1;
+  if (page < 0) page = 0;
+  $('ext').innerHTML = lastTiles.slice(page * per, (page + 1) * per).join('');
+  $('pager').innerHTML = pages > 1
+    ? '<button class="parrow" data-go="-1"'+(page===0?' disabled':'')+'>‹</button>'
+      + Array.from({length: pages}, (_, i) => '<button class="pdot'+(i===page?' on':'')+'" data-page="'+i+'" aria-label="page '+(i+1)+'"></button>').join('')
+      + '<button class="parrow" data-go="1"'+(page===pages-1?' disabled':'')+'>›</button>'
+    : '';
+}
+$('pager').addEventListener('click', (e) => {
+  const d = e.target.closest('.pdot'); const a = e.target.closest('.parrow');
+  if (d) page = +d.dataset.page; else if (a && !a.disabled) page += +a.dataset.go; else return;
+  drawPage();
+});
+// swipe left/right on the grid
+let swipeX = null;
+$('ext').addEventListener('touchstart', (e) => { swipeX = e.touches[0].clientX; }, { passive: true });
+$('ext').addEventListener('touchend', (e) => {
+  if (swipeX === null) return;
+  const dx = e.changedTouches[0].clientX - swipeX; swipeX = null;
+  if (Math.abs(dx) < 50) return;
+  page += dx < 0 ? 1 : -1; drawPage();
+});
+
 function renderGrid(external, agents, rcarm){
   const tiles = external.map(a => {
     const t = tileState(a, (rcarm||{})[a.name]);
@@ -335,7 +394,8 @@ function renderGrid(external, agents, rcarm){
   }));
   $('extlabel').style.display = 'none';
   $('list').innerHTML = '';
-  $('ext').innerHTML = tiles.length ? tiles.join('') : '<a class="tile" href="'+START+'/new"><span class="tname">New agent</span></a>';
+  lastTiles = tiles.length ? tiles : ['<a class="tile" href="'+START+'/new"><span class="tname">New agent</span></a>'];
+  drawPage();
 }
 
 // A terminal with no bridgeSessionId cannot be chatted with from anywhere — not here, not in
