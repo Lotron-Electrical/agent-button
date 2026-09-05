@@ -892,7 +892,6 @@ async function deliverRcFile(job) {
   fs.mkdirSync(INBOX_DIR, { recursive: true });
   const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
   const saved = [];
-  const blocks = [];
   (h.files || []).forEach((f, i) => {
     const b64 = (job.chunks[i] || []).join('');
     if (!b64) return;
@@ -900,16 +899,19 @@ async function deliverRcFile(job) {
     const full = path.join(INBOX_DIR, stamp + '-' + name);
     try { fs.writeFileSync(full, Buffer.from(b64, 'base64')); } catch (e) { log('rc-file: write failed ' + full + ': ' + e.message); return; }
     saved.push({ name, path: full, type: f.type || '' });
-    if (/^image\/(png|jpeg|gif|webp)$/.test(f.type || '')) blocks.push({ type: 'image', source: { type: 'base64', media_type: f.type, data: b64 } });
   });
+  // TEXT ONLY, on purpose. A user event whose content is an array of blocks (text + image) is
+  // treated by the CLI as an unsigned cross-session message and HELD behind a Deny/Deliver prompt
+  // on the PC's screen ("The sender did not attest its permission mode"), which nobody on a phone
+  // can answer. A plain string is a normal remote-control turn and lands at once. The agent reads
+  // the saved image itself with its Read tool, which shows it the picture just the same.
   const lines = [];
   if (h.text) lines.push(String(h.text));
   if (saved.length) {
-    lines.push('', 'Attached from the phone (saved on this PC):');
+    lines.push('', 'Attached from the phone (saved on this PC; open images with the Read tool):');
     for (const s of saved) lines.push('- ' + s.path);
   }
-  const content = [{ type: 'text', text: lines.join('\n') || '(attachment)' }].concat(blocks);
-  const res = await rc.send({ sessionId: h.sessionId, text: lines.join('\n'), uuid: h.uuid, content });
+  const res = await rc.send({ sessionId: h.sessionId, text: lines.join('\n') || '(attachment)', uuid: h.uuid });
   log('rc-file: ' + saved.length + ' file(s) -> ' + h.sessionId + ' ' + (res.ok ? 'delivered' : 'FAILED ' + res.error));
   if (!res.ok) {
     try {
