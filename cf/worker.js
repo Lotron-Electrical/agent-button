@@ -4,6 +4,7 @@
 // caches reads at the edge for up to 60s and would make the poller miss fresh tasks).
 import HTML from './app.html';
 import HOME from './home.html';
+import BUILD from './build.json';   // stamped by deploy.sh; pages reload when it changes
 import AGENTS from './agents.html';
 import CHAT from './chat.html';
 import RCCHAT from './rcchat.html';
@@ -538,6 +539,7 @@ export class QueueDO {
         externalTs: (await this.storage.get('externalTs')) || 0,
         solves: (await this.storage.get('solves')) || [],
         rcarm: (await this.storage.get('rcarm')) || {},
+        build: BUILD.build,
         stats,
         ts: Date.now()
       });

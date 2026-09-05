@@ -98,6 +98,30 @@
   .rcarm.workin{color:var(--warn); border-color:rgba(217,168,79,.45); background:rgba(217,168,79,.10)}
   .rcarm.bad{color:var(--err); border-color:rgba(217,101,90,.45); background:rgba(217,101,90,.10)}
   .rcwhy{font-size:11px; color:var(--dim); text-align:center; margin-top:6px; line-height:1.45; overflow-wrap:anywhere}
+  /* Agents as a GRID that fits the screen, not a list that scrolls. Two columns, rows share the
+     height that is left under the header, so every agent is on screen at once and one tap opens
+     it. The tile says the name and one status word; nothing else. */
+  body.gridview{display:flex; flex-direction:column; height:100dvh; min-height:0; overflow:hidden}
+  body.gridview header{flex:none}
+  body.gridview #sub{display:none}
+  body.gridview #ext{flex:1; min-height:0; display:grid; grid-template-columns:1fr 1fr; grid-auto-rows:1fr; gap:12px; padding:4px 0}
+  body.gridview #ext:empty{display:none}
+  .tile{position:relative; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:8px; text-align:center;
+        border-radius:16px; border:1px solid var(--line); background:var(--panel); color:var(--ink); text-decoration:none;
+        padding:12px; min-height:0; overflow:hidden; font:inherit; cursor:pointer; -webkit-tap-highlight-color:transparent}
+  .tile:link, .tile:visited{color:var(--ink)}
+  .tile:active{border-color:var(--accent); background:var(--panel2)}
+  .tile .tname{font-size:15px; font-weight:600; line-height:1.3; overflow-wrap:anywhere; display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden}
+  .tile .tstate{font-size:11px; letter-spacing:.5px; text-transform:uppercase; color:var(--dim)}
+  .tile.busy .tstate{color:var(--accent2)}
+  .tile.busy{border-color:rgba(224,121,79,.5); box-shadow:inset 0 0 0 1px rgba(224,121,79,.25)}
+  .tile.waiting .tstate{color:var(--warn)}
+  .tile .rcdot{position:absolute; top:10px; right:10px; width:8px; height:8px; border-radius:50%; background:var(--ok); box-shadow:0 0 8px var(--ok)}
+  .tile.off{border-style:dashed}
+  .tile.off .rcdot{background:var(--line); box-shadow:none}
+  .tile.off .tstate{color:var(--accent2)}
+  .tile.arming .tstate{color:var(--warn)}
+  .tile.failed .tstate{color:var(--err)}
   /* remote-control state, at a glance, on every terminal card */
   .rcpill{font-size:10px; font-weight:600; letter-spacing:.5px; text-transform:uppercase; padding:3px 8px; border-radius:20px; white-space:nowrap}
   .rcpill.on{color:var(--ok); border:1px solid rgba(95,184,122,.35); background:rgba(95,184,122,.12)}
@@ -139,10 +163,15 @@
 const SECRET = "__SECRET__";
 const START = "__START__";
 const $ = (id) => document.getElementById(id);
+// Self-refresh on deploy: the relay reports its build stamp on every poll; a new stamp means new
+// pages, so reload rather than keep running yesterday's code on the phone.
+let BUILD_SEEN = null;
+function bumped(b){ if(!b) return false; if(BUILD_SEEN===null){ BUILD_SEEN=b; return false; } if(b!==BUILD_SEEN){ location.reload(); return true; } return false; }
 const VIEW = new URLSearchParams(location.search).get('view') || 'agents';   // agents | relays | account
 $('hometitle').textContent = VIEW.toUpperCase();
 document.title = VIEW.charAt(0).toUpperCase() + VIEW.slice(1);
 if (VIEW !== 'agents') $('sub').textContent = '';
+if (VIEW === 'agents') document.body.classList.add('gridview');
 
 function api(p, opts){ return fetch(p, { ...(opts||{}), headers: { Authorization: 'Bearer ' + SECRET, ...((opts&&opts.headers)||{}) } }); }
 function ago(ts){ if(!ts) return ''; let s=Math.max(0,Math.round((Date.now()-ts)/1000)); if(s<60)return s+'s'; if(s<3600)return Math.round(s/60)+'m'; return Math.round(s/3600)+'h'; }
@@ -185,6 +214,40 @@ function accountHtml(a){
     '</div>'+
     (alt.length ? '<div class="alt">also captured: '+esc(alt.join(', '))+'</div>' : '')+
     '</div>';
+}
+
+// The agents screen: every agent is a tile, all tiles fit the screen, one tap opens the chat.
+// A tile with no bridge is dashed and its tap connects remote control instead.
+function tileState(a, arm){
+  const st = String(a.status||'').toLowerCase();
+  if (!a.bridgeSessionId) {
+    const s = arm && arm.state;
+    if (s==='queued' || s==='arming' || s==='ok') return { cls:'off arming', word:'connecting', act:'none' };
+    if (s==='fail') return { cls:'off failed', word:'retry', act:'arm' };
+    return { cls:'off', word:'connect', act:'arm' };
+  }
+  if (st==='busy'||st==='thinking') return { cls:'busy', word:'working', act:'chat' };
+  if (st==='waiting') return { cls:'waiting', word:'waiting', act:'chat' };
+  return { cls:'idle', word: st||'live', act:'chat' };
+}
+function renderGrid(external, agents, rcarm){
+  const tiles = external.map(a => {
+    const t = tileState(a, (rcarm||{})[a.name]);
+    const inner = '<span class="rcdot"></span><span class="tname">'+esc(a.name)+'</span><span class="tstate">'+esc(t.word)+'</span>';
+    if (t.act==='chat') {
+      const url = START+'/rc?id='+encodeURIComponent(a.bridgeSessionId)+'&name='+encodeURIComponent(a.name||'');
+      return '<a class="tile openchat '+t.cls+'" href="'+url+'" data-name="'+esc(a.name)+'">'+inner+'</a>';
+    }
+    if (t.act==='arm') return '<button type="button" class="tile rcarm '+t.cls+'" data-tab="'+esc(a.name)+'">'+inner+'</button>';
+    return '<div class="tile '+t.cls+'">'+inner+'</div>';
+  }).concat(agents.map(a => {
+    // in-app (headless) agents sit in the same grid; their chat page opens in the sheet too
+    const st = statusInfo(a.status);
+    return '<a class="tile openchat '+(st.cls==='busy'?'busy':'idle')+'" href="'+START+'/chat?id='+encodeURIComponent(a.id)+'" data-name="'+esc(a.title||a.id)+'"><span class="tname">'+esc(a.title||a.id)+'</span><span class="tstate">'+esc(st.label)+'</span></a>';
+  }));
+  $('extlabel').style.display = 'none';
+  $('list').innerHTML = '';
+  $('ext').innerHTML = tiles.length ? tiles.join('') : '<a class="tile" href="'+START+'/new"><span class="tname">New agent</span></a>';
 }
 
 // A terminal with no bridgeSessionId cannot be chatted with from anywhere — not here, not in
@@ -325,6 +388,7 @@ async function refresh(){
   let data;
   try { data = await (await api('/agents')).json(); }
   catch(e){ $('sub').textContent = 'can’t reach relay'; return; }
+  if (bumped(data.build)) return;
   const agents = data.agents || [];
   const external = data.external || [];
   // The count covers everything on the page you can talk to, terminal tabs included.
@@ -336,8 +400,7 @@ async function refresh(){
   if (VIEW === 'account') { renderStats(data.stats); $('sub').textContent = ''; return; }
   if (VIEW === 'relays')  { renderSolves(data.solves || []); $('sub').textContent = ''; return; }
   $('sub').innerHTML = total+' agent'+(total===1?'':'s')+(working?' · '+working+' working':'');
-  renderExternal(external, data.rcarm || {});
-  render(agents, external.length > 0);
+  renderGrid(external, agents, data.rcarm || {});
 }
 refresh();
 setInterval(refresh, 3000);

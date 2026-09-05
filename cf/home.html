@@ -51,9 +51,11 @@
 <script>
 // The only text beyond the four words: a live count on the tiles that have something in them.
 const SECRET = "__SECRET__";
+let BUILD_SEEN = null;   // reload when the relay's build stamp changes (a deploy just happened)
 async function counts(){
   try {
     const d = await (await fetch('/agents', { headers: { Authorization: 'Bearer ' + SECRET } })).json();
+    if (d.build) { if (BUILD_SEEN === null) BUILD_SEEN = d.build; else if (d.build !== BUILD_SEEN) { location.reload(); return; } }
     const a = (d.agents||[]).length + (d.external||[]).length;
     const r = (d.solves||[]).filter(s => s.status!=='solved' && s.status!=='stopped').length;
     const na = document.getElementById('nagents'), nr = document.getElementById('nrelays');
