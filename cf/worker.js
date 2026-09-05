@@ -129,7 +129,7 @@ export default {
     if (p === '/health') return json({ ok: true });
 
     // front door: four tiles, one per section (capability URL)
-    if (SECRET && p === '/p/' + SECRET) {
+    if (SECRET && (p === '/p/' + SECRET || p === '/p/' + SECRET + '/')) {   // with or without the trailing slash
       const html = HOME.replaceAll('__SECRET__', SECRET).replaceAll('__START__', '/p/' + SECRET);
       return new Response(html, { headers: { 'content-type': 'text/html;charset=utf-8', 'cache-control': 'no-store' } });
     }

@@ -36,6 +36,7 @@
   a.tile:active{border-color:var(--accent); background:#1d1d1d}
   a.tile.primary{background:linear-gradient(135deg,var(--accent2),var(--accent)); border-color:transparent; box-shadow:0 10px 30px rgba(193,95,60,.28)}
   a.tile.primary:link, a.tile.primary:visited{color:#1a0f0a}
+  a.tile.wide{grid-column:1 / -1; min-height:90px}
   .n{position:absolute; top:12px; right:14px; font-size:12px; font-weight:600; color:var(--ok); border:1px solid rgba(95,184,122,.35); background:rgba(95,184,122,.12); padding:2px 8px; border-radius:20px}
   a.tile{position:relative}
 </style>
@@ -43,10 +44,11 @@
 <body>
   <header><div class="dot"></div><h1>AGENTS <span>// your PC</span></h1></header>
   <nav class="grid">
-    <a class="tile primary" href="__START__/new">New</a>
+    <a class="tile primary wide" href="__START__/new">New</a>
     <a class="tile" href="__START__/agents"><span class="n" id="nagents" hidden></span>Agents</a>
     <a class="tile" href="__START__/agents?view=relays"><span class="n" id="nrelays" hidden></span>Relays</a>
     <a class="tile" href="__START__/agents?view=account">Account</a>
+    <a class="tile" href="__START__/agents?view=usage">Usage</a>
   </nav>
 <script>
 // The only text beyond the four words: a live count on the tiles that have something in them.

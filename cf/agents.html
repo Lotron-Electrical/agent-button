@@ -49,6 +49,21 @@
   .acct .plan{color:var(--dim)}
   .acct .alt{margin-top:3px; opacity:.75}
   .sub{font-size:12px; color:var(--dim); margin:0 2px 14px; letter-spacing:.3px}
+  /* usage: one card per account, one row per window: label | bar | value */
+  .ucard{background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:11px 13px; margin-bottom:12px}
+  .ucard.active{border-color:rgba(224,121,79,.5)}
+  .utitle{display:flex; align-items:center; gap:8px; font-size:13px; font-weight:600; margin-bottom:6px}
+  .utitle small{margin-left:auto; font-weight:400; font-size:11px; color:var(--dim); white-space:nowrap}
+  .upill{font-size:10px; font-weight:600; letter-spacing:.5px; text-transform:uppercase; color:var(--accent2); border:1px solid rgba(224,121,79,.45); background:rgba(224,121,79,.10); padding:1px 7px; border-radius:20px}
+  .urow{display:flex; align-items:center; gap:10px; font-size:12px; margin:6px 0}
+  .ulab{width:78px; flex:none; color:var(--dim)}
+  .urow .bar{flex:1; height:8px; background:var(--panel2); border-radius:6px; overflow:hidden}
+  .urow .bar i{display:block; height:100%; border-radius:6px; background:linear-gradient(90deg,var(--accent2),var(--accent)); transition:width .4s}
+  .urow .bar i.hot{background:linear-gradient(90deg,#d9a84f,#d9655a)}
+  .uval{flex:none; min-width:44px; text-align:right; color:var(--ink); white-space:nowrap; display:flex; flex-direction:column; align-items:flex-end; line-height:1.25}
+  .uval.wide{flex:1}
+  .uval small{font-size:10px; color:var(--dim); font-weight:400}
+  .unote{font-size:12px; color:var(--dim); padding:4px 0}
   /* cards */
   a.card{
     display:block; text-decoration:none; color:inherit; position:relative;
@@ -202,6 +217,53 @@ function planLabel(a){
   // "default_claude_max_20x" -> "20x"
   const m = /(\d+)\s*x/i.exec(a.tier||'');
   return [nice, m ? m[1]+'x' : ''].filter(Boolean).join(' ');
+}
+// ---- usage: rate-limit windows and token counts, as label / bar / value rows ----
+function fmtTok(n){ n=+n||0; if(n>=1e9) return (n/1e9).toFixed(1)+'B'; if(n>=1e6) return (n/1e6).toFixed(1)+'M'; if(n>=1e3) return Math.round(n/1e3)+'k'; return String(n); }
+function until(ts){ if(!ts) return ''; const ms=(typeof ts==='number'?ts:Date.parse(ts))-Date.now(); if(!(ms>0)) return 'now'; const h=Math.floor(ms/3600000), m=Math.round((ms%3600000)/60000); return h>=48 ? Math.round(h/24)+'d' : (h? h+'h '+m+'m' : m+'m'); }
+function limitLabel(k){ return ({session:'5 hour', weekly_all:'7 day', weekly_scoped:'7 day Opus', primary:'5 hour', secondary:'7 day'})[k] || k; }
+function barRow(label, pct, right){
+  const p = pct==null ? null : Math.max(0,Math.min(100,pct));
+  const hot = p!=null && p>=85;
+  return '<div class="urow"><span class="ulab">'+esc(label)+'</span>'+
+    '<div class="bar"><i class="'+(hot?'hot':'')+'" style="width:'+(p==null?0:p)+'%"></i></div>'+
+    '<span class="uval">'+(p==null?'–':p+'%')+(right?'<small>'+esc(right)+'</small>':'')+'</span></div>';
+}
+function limitsRows(limits){
+  const rows = (limits||[]).filter(l => l && (l.kind==='session'||l.kind==='weekly_all'||l.kind==='weekly_scoped'||l.kind==='primary'||l.kind==='secondary'));
+  if(!rows.length) return '<div class="unote">no limit data yet</div>';
+  return rows.map(l => barRow(limitLabel(l.kind), l.percent, l.resetsAt ? 'resets '+until(l.resetsAt) : '')).join('');
+}
+function tokensHtml(t){
+  if(!t) return '';
+  const row = (lab, v) => v ? '<div class="urow"><span class="ulab">'+lab+'</span><span class="uval wide">'+fmtTok(v.in+v.out)+'<small>'+fmtTok(v.in)+' in · '+fmtTok(v.out)+' out</small></span></div>' : '';
+  return '<div class="ucard"><div class="utitle">Tokens</div>'+row('5 hour', t.fiveHour)+row('Today', t.today)+row('Week', t.week)+
+    (t.burnPerMin ? '<div class="urow"><span class="ulab">Burn</span><span class="uval wide">'+fmtTok(t.burnPerMin)+'<small>per minute</small></span></div>' : '')+'</div>';
+}
+// The connected account's own windows, shown under the account line on the Account screen.
+function activeUsageHtml(u){
+  if(!u || !u.accounts) return '';
+  const a = u.accounts.find(x => x.active);
+  if(!a) return '';
+  return '<div class="ucard"><div class="utitle">Limits'+(a.error?'<small>'+esc(a.error)+'</small>':'')+'</div>'+limitsRows(a.limits)+'</div>'+tokensHtml(u.tokens);
+}
+// The Usage screen: every Claude account, then Codex.
+function renderUsage(st){
+  const u = st && st.usage;
+  const el = $('list');
+  if(!u){ el.innerHTML = '<div class="unote">usage widget is not running on the PC</div>'; return; }
+  let h = '';
+  for (const a of (u.accounts||[])) {
+    h += '<div class="ucard'+(a.active?' active':'')+'"><div class="utitle">'+esc(a.name||a.email)+(a.active?'<span class="upill">connected</span>':'')+
+         (a.burnPerMin?'<small>'+fmtTok(a.burnPerMin)+'/min</small>':'')+'</div>'+limitsRows(a.limits)+
+         (a.error&&!a.limits?'<div class="unote">'+esc(a.error)+'</div>':'')+'</div>';
+  }
+  if (u.codex) {
+    h += '<div class="ucard"><div class="utitle">Codex'+(u.codex.planType?'<span class="upill">'+esc(u.codex.planType)+'</span>':'')+'</div>'+
+         ((u.codex.limits||[]).length ? u.codex.limits.map(l => barRow(l.windowMinutes>=10000?'7 day':(l.windowMinutes>=240?'5 hour':l.windowMinutes+' min'), l.percent, l.resetsAt?'resets '+until(l.resetsAt):'')).join('') : '<div class="unote">no limit data yet</div>')+'</div>';
+  }
+  h += tokensHtml(u.tokens);
+  el.innerHTML = h;
 }
 function accountHtml(a){
   if(!a || (!a.email && !a.plan)) return '';
@@ -397,7 +459,8 @@ async function refresh(){
                 + external.filter(a => (a.status==='busy'||a.status==='thinking')).length;
   // One section per screen. The home page links here with ?view=agents|relays|account and
   // this page shows only that section, so nothing on screen competes with what was tapped.
-  if (VIEW === 'account') { renderStats(data.stats); $('sub').textContent = ''; return; }
+  if (VIEW === 'account') { renderStats(data.stats); $('list').innerHTML = activeUsageHtml(data.stats && data.stats.usage); $('sub').textContent = ''; return; }
+  if (VIEW === 'usage')   { renderUsage(data.stats); $('sub').textContent = ''; return; }
   if (VIEW === 'relays')  { renderSolves(data.solves || []); $('sub').textContent = ''; return; }
   $('sub').innerHTML = total+' agent'+(total===1?'':'s')+(working?' · '+working+' working':'');
   renderGrid(external, agents, data.rcarm || {});

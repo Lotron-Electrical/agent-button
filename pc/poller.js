@@ -493,11 +493,46 @@ function readAccount() {
   };
 }
 
+// ---------- token usage + rate limits, every account, plus Codex ----------
+// The usage widget (~/scripts/claude-usage-widget/server.js, in the Startup folder) already does
+// the hard part: polls api.anthropic.com/api/oauth/usage for the live account, reads the captured
+// idle profiles' own windows, sums tokens out of every transcript on disk, and lifts Codex's
+// rate_limits out of ~/.codex/sessions. We just read its /data and keep the fields the phone
+// can show. Cached 15s so a fast-polling dashboard cannot hammer it; null when it is not running.
+const WIDGET_URL = 'http://127.0.0.1:' + (process.env.CLAUDE_USAGE_WIDGET_PORT || 7789) + '/data';
+let usageCache = { at: 0, val: null };
+const lim = (l) => ({ kind: l.kind, percent: l.percent == null ? null : Math.round(l.percent), resetsAt: l.resets_at || null });
+const tok = (t) => t ? { in: t.in || 0, out: t.out || 0, cacheRead: t.cacheRead || 0, cacheCreate: t.cacheCreate || 0 } : null;
+async function readUsage() {
+  if (Date.now() - usageCache.at < 15000) return usageCache.val;
+  let val = null;
+  try {
+    const ctl = new AbortController(); const tm = setTimeout(() => ctl.abort(), 4000);
+    const r = await fetch(WIDGET_URL, { signal: ctl.signal }); clearTimeout(tm);
+    const j = await r.json();
+    const list = (j.accounts && j.accounts.list) || [];
+    val = {
+      ok: !!j.ok, error: j.error || null, fetchedAt: j.fetchedAt || null, ageSec: j.ageSec,
+      accounts: list.map((a) => ({
+        name: a.name, email: a.email, active: !!a.active, state: a.state || null, error: a.error || null,
+        limits: (a.limits || []).map(lim),
+        burnPerMin: a.burn ? (a.burn.tokPerMin || 0) : 0
+      })),
+      tokens: j.tokens ? { fiveHour: tok(j.tokens.fiveHour), today: tok(j.tokens.today), week: tok(j.tokens.week), burnPerMin: j.tokens.burn ? (j.tokens.burn.perMin || 0) : 0 } : null,
+      codex: j.codex ? { planType: j.codex.planType || null, ageSec: j.codex.ageSec, limits: (j.codex.limits || []).map((l) => ({ kind: l.kind, percent: Math.round(l.usedPercent), windowMinutes: l.windowMinutes, resetsAt: l.resetsAt ? l.resetsAt * 1000 : null })) } : null,
+      ts: Date.now()
+    };
+  } catch (_) { val = null; }
+  usageCache = { at: Date.now(), val };
+  return val;
+}
+
 async function reportStats() {
   const total = os.totalmem() / 1073741824, free = os.freemem() / 1073741824;
   const stats = {
     host: os.hostname(),
     account: readAccount(),
+    usage: await readUsage(),
     cpuPct: cpuPercent(),
     cores: os.cpus().length,
     ramUsedGB: +(total - free).toFixed(1),
