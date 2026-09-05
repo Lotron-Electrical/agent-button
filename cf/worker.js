@@ -330,6 +330,14 @@ export default {
       if (!authed()) return json({ error: 'unauthorized' }, 401);
       return queueStub(env).fetch('https://do/rcarmnext', { method: 'POST' });
     }
+    // ---- display names ----
+    // A terminal is known to the app by its tab title (or bridge id); neither can be changed
+    // from a phone. An alias is the app's own name for it: stored here, shown everywhere,
+    // never sent to the PC. Empty name = clear.
+    if (p === '/alias' && method === 'POST') {
+      if (!authed()) return json({ error: 'unauthorized' }, 401);
+      return queueStub(env).fetch('https://do/alias', { method: 'POST', body: await req.text() });
+    }
     if (p === '/rc/armresult' && method === 'POST') {           // poller: report what the re-arm did
       if (!authed()) return json({ error: 'unauthorized' }, 401);
       return queueStub(env).fetch('https://do/rcarmresult', { method: 'POST', body: await req.text() });
@@ -539,6 +547,7 @@ export class QueueDO {
         externalTs: (await this.storage.get('externalTs')) || 0,
         solves: (await this.storage.get('solves')) || [],
         rcarm: (await this.storage.get('rcarm')) || {},
+        aliases: (await this.storage.get('aliases')) || {},
         build: BUILD.build,
         stats,
         ts: Date.now()
@@ -586,6 +595,18 @@ export class QueueDO {
       for (const it of q) st[it.tab] = { state: 'arming', at: now };
       await this.storage.put('rcarm', trimArm(st));
       return json({ items: q });
+    }
+    if (op === 'alias') {
+      const b = await request.json();                       // {key, name}
+      const key = String(b.key || '').trim().slice(0, 120);
+      if (!key) return json({ error: 'key required' }, 400);
+      const name = String(b.name || '').trim().slice(0, 60);
+      const al = (await this.storage.get('aliases')) || {};
+      if (name) al[key] = name; else delete al[key];
+      // Cap the map: a key whose agent is long gone is dead weight, and 200 renames is plenty.
+      const keys = Object.keys(al); if (keys.length > 200) for (const k of keys.slice(0, keys.length - 200)) delete al[k];
+      await this.storage.put('aliases', al);
+      return json({ ok: true });
     }
     if (op === 'rcarmresult') {
       const b = await request.json();                       // {tab, ok, detail}

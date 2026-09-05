@@ -119,6 +119,10 @@
   body.gridview{display:flex; flex-direction:column; height:100dvh; min-height:0; overflow:hidden}
   body.gridview header{flex:none}
   body.gridview #sub{display:none}
+  body.gridview .stats{flex:none; margin-bottom:10px}
+  .stats.compact{padding:8px 12px}
+  .stats.compact .srow{margin:3px 0}
+  .stats.compact .shost{margin-top:4px}
   body.gridview #ext{flex:1; min-height:0; display:grid; grid-template-columns:1fr 1fr; grid-auto-rows:1fr; gap:12px; padding:4px 0}
   body.gridview #ext:empty{display:none}
   .tile{position:relative; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:8px; text-align:center;
@@ -128,13 +132,17 @@
   .tile:active{border-color:var(--accent); background:var(--panel2)}
   .tile .tname{font-size:15px; font-weight:600; line-height:1.3; overflow-wrap:anywhere; display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden}
   .tile .tstate{font-size:11px; letter-spacing:.5px; text-transform:uppercase; color:var(--dim)}
-  .tile.busy .tstate{color:var(--accent2)}
-  .tile.busy{border-color:rgba(224,121,79,.5); box-shadow:inset 0 0 0 1px rgba(224,121,79,.25)}
-  .tile.waiting .tstate{color:var(--warn)}
-  .tile .rcdot{position:absolute; top:10px; right:10px; width:8px; height:8px; border-radius:50%; background:var(--ok); box-shadow:0 0 8px var(--ok)}
-  .tile.off{border-style:dashed}
-  .tile.off .rcdot{background:var(--line); box-shadow:none}
+  /* Colour is the state, read from across the room: GREEN working, RED idle, ORANGE not connected. */
+  .tile.busy{border-color:rgba(95,184,122,.6); background:rgba(95,184,122,.10)}
+  .tile.busy .tstate, .tile.busy .rcdot{color:var(--ok)}
+  .tile.busy .rcdot{background:var(--ok); box-shadow:0 0 8px var(--ok)}
+  .tile.idle, .tile.waiting{border-color:rgba(217,101,90,.6); background:rgba(217,101,90,.10)}
+  .tile.idle .tstate, .tile.waiting .tstate{color:var(--err)}
+  .tile.idle .rcdot, .tile.waiting .rcdot{background:var(--err); box-shadow:0 0 8px var(--err)}
+  .tile.off{border-color:rgba(224,121,79,.6); background:rgba(224,121,79,.10); border-style:dashed}
   .tile.off .tstate{color:var(--accent2)}
+  .tile.off .rcdot{background:var(--accent2); box-shadow:0 0 8px var(--accent2)}
+  .tile .rcdot{position:absolute; top:10px; right:10px; width:8px; height:8px; border-radius:50%}
   .tile.arming .tstate{color:var(--warn)}
   .tile.failed .tstate{color:var(--err)}
   /* remote-control state, at a glance, on every terminal card */
@@ -194,10 +202,21 @@ function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g, c => ({'&':'&amp
 function shortCwd(c){ if(!c) return ''; return c.replace(/^[A-Za-z]:\\Users\\[^\\]+/, '~').replace(/^\/[a-z]\/Users\/[^/]+/i,'~').replace(/\\/g,'/'); }
 function statusInfo(s){ s=String(s||'').toLowerCase(); if(s==='thinking'||s==='busy')return{label:'working',cls:'busy'}; if(s==='idle')return{label:'idle',cls:'idle'}; if(s==='live')return{label:'live',cls:'idle'}; if(s==='solved')return{label:'solved',cls:'idle'}; if(s==='error')return{label:'error',cls:'err'}; return{label:s||'new',cls:'other'}; }
 
-function renderStats(st){
+function renderStats(st, compact){
   const el = $('stats');
   if(!st || !st.ts){ el.style.display='none'; return; }
   el.style.display='block';
+  el.classList.toggle('compact', !!compact);
+  if (compact) {
+    // Two bars and the host line, nothing else: the grid below needs the height.
+    const cpu = Math.max(0,Math.min(100, st.cpuPct||0)), ram = Math.max(0,Math.min(100, st.ramPct||0));
+    const fresh = (Date.now()-st.ts) < 20000;
+    el.innerHTML =
+      '<div class="srow"><span class="lab">CPU</span><div class="bar"><i class="'+(cpu>85?'hot':'')+'" style="width:'+cpu+'%"></i></div><span class="val">'+cpu+'%</span></div>'+
+      '<div class="srow"><span class="lab">RAM</span><div class="bar"><i class="'+(ram>88?'hot':'')+'" style="width:'+ram+'%"></i></div><span class="val">'+(st.ramUsedGB||0)+' / '+(st.ramTotalGB||0)+' GB</span></div>'+
+      '<div class="shost'+(fresh?'':' off')+'"><span class="live"></span>'+esc(st.host||'PC')+(fresh?' · online':' · last seen '+ago(st.ts)+' ago')+(st.uptimeH?' · up '+st.uptimeH+'h':'')+'</div>';
+    return;
+  }
   const fresh = (Date.now()-st.ts) < 20000;
   const cpu = Math.max(0,Math.min(100, st.cpuPct||0));
   const ram = Math.max(0,Math.min(100, st.ramPct||0));
@@ -292,16 +311,23 @@ function tileState(a, arm){
   if (st==='waiting') return { cls:'waiting', word:'waiting', act:'chat' };
   return { cls:'idle', word: st||'live', act:'chat' };
 }
+// Names you gave agents from the phone. Keyed by bridge id when there is one (survives a tab
+// rename), else by tab title. Long-press a tile to rename it.
+let ALIASES = {};
+const aliasKey = (a) => a.bridgeSessionId || ('tab:' + a.name);
+const shown = (a) => ALIASES[aliasKey(a)] || a.name;
 function renderGrid(external, agents, rcarm){
   const tiles = external.map(a => {
     const t = tileState(a, (rcarm||{})[a.name]);
-    const inner = '<span class="rcdot"></span><span class="tname">'+esc(a.name)+'</span><span class="tstate">'+esc(t.word)+'</span>';
+    const label = shown(a);
+    const inner = '<span class="rcdot"></span><span class="tname">'+esc(label)+'</span><span class="tstate">'+esc(t.word)+'</span>';
+    const keyAttr = ' data-key="'+esc(aliasKey(a))+'" data-label="'+esc(label)+'"';
     if (t.act==='chat') {
-      const url = START+'/rc?id='+encodeURIComponent(a.bridgeSessionId)+'&name='+encodeURIComponent(a.name||'');
-      return '<a class="tile openchat '+t.cls+'" href="'+url+'" data-name="'+esc(a.name)+'">'+inner+'</a>';
+      const url = START+'/rc?id='+encodeURIComponent(a.bridgeSessionId)+'&name='+encodeURIComponent(label);
+      return '<a class="tile openchat '+t.cls+'" href="'+url+'" data-name="'+esc(label)+'"'+keyAttr+'>'+inner+'</a>';
     }
-    if (t.act==='arm') return '<button type="button" class="tile rcarm '+t.cls+'" data-tab="'+esc(a.name)+'">'+inner+'</button>';
-    return '<div class="tile '+t.cls+'">'+inner+'</div>';
+    if (t.act==='arm') return '<button type="button" class="tile rcarm '+t.cls+'" data-tab="'+esc(a.name)+'"'+keyAttr+'>'+inner+'</button>';
+    return '<div class="tile '+t.cls+'"'+keyAttr+'>'+inner+'</div>';
   }).concat(agents.map(a => {
     // in-app (headless) agents sit in the same grid; their chat page opens in the sheet too
     const st = statusInfo(a.status);
@@ -363,7 +389,29 @@ $('sheetclose').addEventListener('click', () => { if (history.state && history.s
 window.addEventListener('popstate', closeChat);            // the phone back gesture closes it
 window.addEventListener('message', (ev) => { if (ev.data === 'rc-close') $('sheetclose').click(); });
 
+// Long-press a tile to rename it. The press is detected by hand (600ms, no movement) because a
+// phone's native long-press on a link opens the context menu, which is swallowed below.
+let pressTimer = null, pressed = null, renamed = false;
+function armPress(el){ clearTimeout(pressTimer); pressed = el; renamed = false; pressTimer = setTimeout(() => { renamed = true; renameTile(el); }, 600); }
+function cancelPress(){ clearTimeout(pressTimer); pressTimer = null; }
+async function renameTile(el){
+  const key = el.dataset.key; if (!key) return;
+  const cur = el.dataset.label || '';
+  const name = prompt('Name this agent', cur);
+  if (name === null) return;
+  const trimmed = name.trim();
+  if (trimmed) ALIASES[key] = trimmed; else delete ALIASES[key];
+  refresh();
+  try { await api('/alias', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ key, name: trimmed }) }); } catch(_){}
+}
+$('ext').addEventListener('pointerdown', (e) => { const t = e.target.closest('.tile'); if (t && t.dataset.key) armPress(t); });
+$('ext').addEventListener('pointerup', cancelPress);
+$('ext').addEventListener('pointercancel', cancelPress);
+$('ext').addEventListener('pointermove', (e) => { if (pressTimer && (Math.abs(e.movementX) + Math.abs(e.movementY)) > 6) cancelPress(); });
+$('ext').addEventListener('contextmenu', (e) => { if (e.target.closest('.tile')) e.preventDefault(); });
+
 $('ext').addEventListener('click', async (e) => {
+  if (renamed) { renamed = false; e.preventDefault(); return; }   // the long-press already handled this touch
   const chat = e.target.closest('.openchat');
   if (chat) { e.preventDefault(); openChat(chat.getAttribute('href'), chat.dataset.name); return; }
   const btn = e.target.closest('.rcarm');
@@ -451,6 +499,7 @@ async function refresh(){
   try { data = await (await api('/agents')).json(); }
   catch(e){ $('sub').textContent = 'can’t reach relay'; return; }
   if (bumped(data.build)) return;
+  ALIASES = data.aliases || {};
   const agents = data.agents || [];
   const external = data.external || [];
   // The count covers everything on the page you can talk to, terminal tabs included.
@@ -463,6 +512,7 @@ async function refresh(){
   if (VIEW === 'usage')   { renderUsage(data.stats); $('sub').textContent = ''; return; }
   if (VIEW === 'relays')  { renderSolves(data.solves || []); $('sub').textContent = ''; return; }
   $('sub').innerHTML = total+' agent'+(total===1?'':'s')+(working?' · '+working+' working':'');
+  renderStats(data.stats, true);                  // PC stats strip above the grid, compact
   renderGrid(external, agents, data.rcarm || {});
 }
 refresh();

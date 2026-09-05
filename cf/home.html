@@ -26,6 +26,16 @@
   .dot{width:10px; height:10px; border-radius:50%; background:var(--accent); box-shadow:0 0 12px var(--accent)}
   h1{font-size:17px; margin:0; letter-spacing:.5px; font-weight:600; flex:1}
   h1 span{color:var(--dim); font-weight:400}
+  .stats{background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:8px 12px; margin:4px 0 6px; font-size:12px}
+  .srow{display:flex; align-items:center; gap:10px; margin:3px 0}
+  .srow .lab{width:30px; color:var(--dim); letter-spacing:.4px}
+  .srow .bar{flex:1; height:8px; background:#1d1d1d; border-radius:6px; overflow:hidden}
+  .srow .bar i{display:block; height:100%; border-radius:6px; background:linear-gradient(90deg,var(--accent2),var(--accent)); transition:width .4s}
+  .srow .bar i.hot{background:linear-gradient(90deg,#d9a84f,#d9655a)}
+  .srow .val{flex:none; min-width:96px; text-align:right; color:var(--ink); white-space:nowrap}
+  .shost{font-size:11px; color:var(--dim); margin-top:4px; display:flex; align-items:center; gap:6px}
+  .shost .live{width:7px; height:7px; border-radius:50%; background:var(--ok); box-shadow:0 0 8px var(--ok)}
+  .shost.off{color:#d9655a} .shost.off .live{background:#d9655a; box-shadow:0 0 8px #d9655a}
   .grid{flex:1; display:grid; grid-template-columns:1fr 1fr; grid-auto-rows:1fr; gap:14px; align-content:stretch; padding:8px 0}
   a.tile{
     display:flex; align-items:center; justify-content:center; text-decoration:none;
@@ -43,6 +53,8 @@
 </head>
 <body>
   <header><div class="dot"></div><h1>AGENTS <span>// your PC</span></h1></header>
+  <!-- PC at a glance, above the buttons: two bars, one host line -->
+  <div class="stats" id="stats" hidden></div>
   <nav class="grid">
     <a class="tile primary wide" href="__START__/new">New</a>
     <a class="tile" href="__START__/agents"><span class="n" id="nagents" hidden></span>Agents</a>
@@ -54,10 +66,23 @@
 // The only text beyond the four words: a live count on the tiles that have something in them.
 const SECRET = "__SECRET__";
 let BUILD_SEEN = null;   // reload when the relay's build stamp changes (a deploy just happened)
+const esc = (s) => String(s==null?'':s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+function stats(st){
+  const el = document.getElementById('stats');
+  if (!st || !st.ts) { el.hidden = true; return; }
+  const cpu = Math.max(0,Math.min(100, st.cpuPct||0)), ram = Math.max(0,Math.min(100, st.ramPct||0));
+  const fresh = (Date.now()-st.ts) < 20000;
+  el.hidden = false;
+  el.innerHTML =
+    '<div class="srow"><span class="lab">CPU</span><div class="bar"><i class="'+(cpu>85?'hot':'')+'" style="width:'+cpu+'%"></i></div><span class="val">'+cpu+'%'+(st.cores?' · '+st.cores+'c':'')+'</span></div>'+
+    '<div class="srow"><span class="lab">RAM</span><div class="bar"><i class="'+(ram>88?'hot':'')+'" style="width:'+ram+'%"></i></div><span class="val">'+(st.ramUsedGB||0)+' / '+(st.ramTotalGB||0)+' GB</span></div>'+
+    '<div class="shost'+(fresh?'':' off')+'"><span class="live"></span>'+esc(st.host||'PC')+(fresh?' · online':' · offline')+(st.uptimeH?' · up '+st.uptimeH+'h':'')+'</div>';
+}
 async function counts(){
   try {
     const d = await (await fetch('/agents', { headers: { Authorization: 'Bearer ' + SECRET } })).json();
     if (d.build) { if (BUILD_SEEN === null) BUILD_SEEN = d.build; else if (d.build !== BUILD_SEEN) { location.reload(); return; } }
+    stats(d.stats);
     const a = (d.agents||[]).length + (d.external||[]).length;
     const r = (d.solves||[]).filter(s => s.status!=='solved' && s.status!=='stopped').length;
     const na = document.getElementById('nagents'), nr = document.getElementById('nrelays');
