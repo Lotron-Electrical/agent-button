@@ -59,6 +59,16 @@
   .send{border:none; border-radius:12px; padding:0 18px; font:inherit; font-size:15px; font-weight:700; color:#1a0f0a;
         background:linear-gradient(135deg,var(--accent2),var(--accent)); min-width:64px}
   .send:disabled{opacity:.45}
+  /* attachments: a + button, and the chosen files as chips above the box until they are sent */
+  .clip{flex:none; width:46px; height:46px; border-radius:12px; border:1px solid var(--line); background:var(--panel); color:var(--accent2); font-size:26px; line-height:1; padding:0}
+  .clip:active{border-color:var(--accent)}
+  .attachrow{display:flex; gap:8px; flex-wrap:wrap; padding:8px 12px 0; background:var(--bg); border-top:1px solid var(--line)}
+  .chip{display:flex; align-items:center; gap:6px; max-width:100%; font-size:12px; padding:5px 8px 5px 10px; border-radius:20px; border:1px solid var(--line); background:var(--panel); color:var(--ink)}
+  .chip img{width:22px; height:22px; border-radius:5px; object-fit:cover}
+  .chip span{overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:180px}
+  .chip b{color:var(--dim); font-weight:400; font-size:11px}
+  .chip button{font:inherit; border:0; background:none; color:var(--dim); font-size:16px; padding:0 2px; line-height:1}
+  .msg.user .att{display:block; font-size:12px; opacity:.85; margin-top:4px}
   .empty{color:var(--dim); text-align:center; margin:auto; font-size:14px; line-height:1.8}
 </style>
 </head>
@@ -70,7 +80,10 @@
   </header>
   <div id="log"></div>
   <div class="gonebar" id="gonebar"><span class="lbl">This session has ended.</span><a id="goneopen" href="https://claude.ai/code" target="_blank" rel="noopener">Open in Claude &#8599;</a></div>
+  <div class="attachrow" id="attachrow" hidden></div>
   <div class="composer">
+    <button class="clip" id="clip" type="button" title="attach">&#43;</button>
+    <input type="file" id="file" multiple hidden />
     <textarea id="box" placeholder="Message this agent&hellip;" rows="1"></textarea>
     <button class="send" id="send">Send</button>
   </div>
@@ -118,7 +131,7 @@ function render(){
     return '<div class="msg '+cls+'">'+who+esc(m.text)+'</div>';
   });
   pending.forEach((p, u)=>{
-    rows.push('<div class="msg user pending'+(p.failed?' failed':'')+'" data-uuid="'+esc(u)+'">'+esc(p.text)+
+    rows.push('<div class="msg user pending'+(p.failed?' failed':'')+'" data-uuid="'+esc(u)+'">'+esc(p.shownText || p.text)+
               (p.failed ? '<div class="retry">not sent &middot; tap to retry</div>' : '')+'</div>');
   });
   if (activity && activity.tool) rows.push('<div class="thinking-row"><div class="spin"></div>using '+esc(activity.tool)+'&hellip;</div>');
@@ -221,31 +234,87 @@ function stop(){
   sub(false);
 }
 
+// ---- attachments ----
+// Chosen files wait as chips until Send. Photos are shrunk on the phone (longest side 1600px,
+// JPEG) so a 12MP shot becomes a few hundred KB and fits the relay's socket frames; anything
+// else goes as-is up to 3MB. The bytes ride /rc/sendfile straight to the PC, never into storage.
+const MAX_FILE = 3 * 1024 * 1024;
+let attached = [];                        // [{name, type, data(base64), preview}]
+function renderAttach(){
+  const row = $('attachrow');
+  row.hidden = !attached.length;
+  row.innerHTML = attached.map((f, i) =>
+    '<div class="chip">'+(f.preview ? '<img src="'+f.preview+'" alt="">' : '')+'<span>'+esc(f.name)+'</span><b>'+kb(f.data.length*0.75)+'</b><button data-i="'+i+'" aria-label="remove">&times;</button></div>').join('');
+}
+function kb(n){ return n > 1048576 ? (n/1048576).toFixed(1)+' MB' : Math.max(1, Math.round(n/1024))+' KB'; }
+function readAsDataURL(file){ return new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(file); }); }
+async function shrinkImage(file){
+  const url = await readAsDataURL(file);
+  const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = url; });
+  const scale = Math.min(1, 1600 / Math.max(img.width, img.height));
+  if (scale === 1 && file.size < 900 * 1024) return { type: file.type, dataUrl: url };   // already small enough
+  const c = document.createElement('canvas');
+  c.width = Math.round(img.width * scale); c.height = Math.round(img.height * scale);
+  c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+  return { type: 'image/jpeg', dataUrl: c.toDataURL('image/jpeg', 0.85) };
+}
+async function addFiles(list){
+  for (const file of list) {
+    try {
+      let type = file.type || 'application/octet-stream', dataUrl, preview = null;
+      if (/^image\//.test(type) && type !== 'image/gif') { const r = await shrinkImage(file); type = r.type; dataUrl = r.dataUrl; preview = dataUrl; }
+      else {
+        if (file.size > MAX_FILE) { alert(file.name + ' is over 3 MB'); continue; }
+        dataUrl = await readAsDataURL(file);
+        if (/^image\//.test(type)) preview = dataUrl;
+      }
+      const data = dataUrl.slice(dataUrl.indexOf(',') + 1);
+      let name = file.name || 'file';
+      if (type === 'image/jpeg' && !/\.jpe?g$/i.test(name)) name = name.replace(/\.[^.]+$/, '') + '.jpg';
+      attached.push({ name, type, data, preview });
+    } catch (e) { alert('Could not read ' + file.name); }
+  }
+  renderAttach();
+}
+$('clip').addEventListener('click', () => $('file').click());
+$('file').addEventListener('change', async (e) => { await addFiles([...e.target.files]); e.target.value = ''; });
+$('attachrow').addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; attached.splice(+b.dataset.i, 1); renderAttach(); });
+// paste a screenshot straight into the box
+$('box').addEventListener('paste', (e) => { const fs = [...(e.clipboardData && e.clipboardData.files || [])]; if (fs.length) { e.preventDefault(); addFiles(fs); } });
+
 // ---- send ----
 async function deliver(u){
   const p = pending.get(u);
   if (!p) return;
   p.failed = false; render();
   try{
-    const r = await api('/rc/send', { method:'POST', headers:{'Content-Type':'application/json'},
-                                      body: JSON.stringify({ sessionId: ID, text: p.text, uuid: u }) });
-    if (!r.ok) throw new Error('HTTP '+r.status);
+    let r;
+    if (p.files && p.files.length) {
+      r = await api('/rc/sendfile', { method:'POST', headers:{'Content-Type':'application/json'},
+                                       body: JSON.stringify({ sessionId: ID, text: p.text, uuid: u, files: p.files.map(f => ({ name: f.name, type: f.type, data: f.data })) }) });
+    } else {
+      r = await api('/rc/send', { method:'POST', headers:{'Content-Type':'application/json'},
+                                   body: JSON.stringify({ sessionId: ID, text: p.text, uuid: u }) });
+    }
+    if (!r.ok) { let why = 'HTTP '+r.status; try { why = (await r.json()).error || why; } catch(_){} throw new Error(why); }
     // rcsend writes the echo into the DO and releases our parked poll, so it lands in ~100ms.
   }catch(e){
     const q = pending.get(u);
-    if (q){ q.failed = true; render(); }
+    if (q){ q.failed = true; q.why = e.message; render(); }
   }
 }
 
 function send(){
   if (!ID || status === 'gone') return;
   const text = $('box').value.trim();
-  if (!text) return;
+  if (!text && !attached.length) return;
   $('box').value = ''; $('box').style.height = '46px';
   // The uuid is minted here and carried unchanged all the way to Anthropic's POST, which dedupes
   // on it -- so a retry over a flaky phone connection can never double-send.
   const u = uuid();
-  pending.set(u, { text, ts: Date.now(), failed: false });
+  const files = attached; attached = []; renderAttach();
+  const shownText = (text ? text + '\n' : '') + files.map(f => '📎 ' + f.name).join('\n');
+  pending.set(u, { text, shownText, files, ts: Date.now(), failed: false });
   render();
   deliver(u);
 }

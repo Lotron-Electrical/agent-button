@@ -309,6 +309,10 @@ export default {
       if (!authed()) return json({ error: 'unauthorized' }, 401);
       return queueStub(env).fetch('https://do/rcsend', { method: 'POST', body: await req.text() });
     }
+    if (p === '/rc/sendfile' && method === 'POST') {          // phone: a message WITH attachments
+      if (!authed()) return json({ error: 'unauthorized' }, 401);
+      return queueStub(env).fetch('https://do/rcsendfile', { method: 'POST', body: await req.text() });
+    }
     if (p === '/rc/push' && method === 'POST') {              // poller: new transcript frames
       if (!authed()) return json({ error: 'unauthorized' }, 401);
       return queueStub(env).fetch('https://do/rcpush', { method: 'POST', body: await req.text() });
@@ -1008,6 +1012,46 @@ export class QueueDO {
       return json({ ok: true, uuid, n: rec.n });
     }
 
+    if (op === 'rcsendfile') {                   // phone: message + files, pushed straight down the socket
+      // Files never touch Durable Object storage (128KB per value, and they are not worth keeping):
+      // the message is forwarded to the connected poller over the live WebSocket, in frames small
+      // enough for the 1MB socket limit, and the poller writes the files to disk on the PC. With
+      // no poller connected there is nowhere to put them, so say so instead of pretending.
+      const b = await request.json().catch(() => ({}));
+      const id = String(b.sessionId || '');
+      const files = Array.isArray(b.files) ? b.files.filter((f) => f && typeof f.data === 'string' && f.data.length) : [];
+      const text = String(b.text || '').trim();
+      if (!id || (!text && !files.length)) return json({ error: 'sessionId and text or files required' }, 400);
+      const socks = this.state.getWebSockets();
+      if (!socks.length) return json({ ok: false, error: 'PC is offline' }, 503);
+      const uuid = String(b.uuid || crypto.randomUUID());
+      const now = Date.now();
+      // Local echo so the sender sees the bubble at once; the names stand in for the bytes.
+      const echo = (text ? text + '\n' : '') + files.map((f) => '📎 ' + String(f.name || 'file')).join('\n');
+      const rec = (await this.storage.get('rcmsgs:' + id)) || { n: 0, messages: [], status: null, activity: null };
+      if (!rec.messages.some((m) => m.uuid === uuid)) {
+        rec.n = (rec.n || 0) + 1;
+        rec.messages.push({ n: rec.n, role: 'user', text: echo.slice(0, 8000), ts: now, uuid });
+        if (rec.messages.length > RC_CAP) rec.messages = rec.messages.slice(-RC_CAP);
+        rec.ts = now;
+        await this.storage.put('rcmsgs:' + id, rec);
+      }
+      const CHUNK = 600000;   // base64 chars per frame; well under the 1MB WebSocket message cap
+      const meta = files.map((f) => ({ name: String(f.name || 'file').slice(0, 120), type: String(f.type || 'application/octet-stream'), size: f.data.length }));
+      const frames = [JSON.stringify({ type: 'rcfile', id: uuid, sessionId: id, text, uuid, files: meta, ts: now })];
+      files.forEach((f, fi) => {
+        const parts = Math.ceil(f.data.length / CHUNK);
+        for (let i = 0; i < parts; i++) frames.push(JSON.stringify({ type: 'rcfilechunk', id: uuid, file: fi, part: i, parts, data: f.data.slice(i * CHUNK, (i + 1) * CHUNK) }));
+      });
+      frames.push(JSON.stringify({ type: 'rcfileend', id: uuid }));
+      // One poller is the norm; if two are connected they would both write the files, so send
+      // to the first live socket only.
+      const ws = socks[0];
+      try { for (const fr of frames) ws.send(fr); } catch (e) { return json({ ok: false, error: 'socket write failed' }, 502); }
+      await this.rcTouch(id);
+      this.rcNotify(id);
+      return json({ ok: true, uuid, n: rec.n, files: meta.length });
+    }
     if (op === 'rcoutnext') {                    // poller: drain outbound + re-sync subscriptions
       const out = (await this.storage.get('rcout')) || [];
       if (out.length) await this.storage.put('rcout', []);

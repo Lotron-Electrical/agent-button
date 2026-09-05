@@ -80,6 +80,12 @@ function normalize(f) {
     if (typeof c !== 'string') return null;     // array content = tool_result, i.e. worker output
     const text = c.trim();
     if (!text) return null;
+    // Not everything wearing role:user was typed by a person. The CLI injects string notes
+    // alongside tool results ("[Image: original 1648x3600, displayed at ...]" after a Read of a
+    // picture, "<system-reminder>" blocks, mid-turn nudges). They confused the phone chat
+    // (2026-09-05: three orange bubbles of image metadata). Drop them.
+    if (/^\[Image: original \d+x\d+/.test(text)) return null;
+    if (/^<system-reminder>/.test(text) || /^The user hasn't heard from you/.test(text)) return null;
     return { kind: 'msg', role: 'user', text, ts, uuid, seq };
   }
 
@@ -306,11 +312,14 @@ function createRcBridge({ relay, headers, log, flushMs }) {
   // Post one of Lloyd's messages into a session. The uuid is minted by the app and carried
   // end to end: the API dedupes on it (results[].duplicate), so a retry over a flaky mobile
   // connection can never double-send. Returns {ok} | {ok:false, error}.
-  async function send({ sessionId, text, uuid }) {
+  // `content`, when given, is an array of Anthropic content blocks (text + image) and replaces the
+  // plain string: the API accepted an image block in a user event on 2026-09-05 (HTTP 200,
+  // seq 1049) and the session received it as a picture, so attachments from the phone go this way.
+  async function send({ sessionId, text, uuid, content }) {
     const body = {
       events: [{
         payload: {
-          message: { content: String(text || ''), role: 'user' },
+          message: { content: Array.isArray(content) && content.length ? content : String(text || ''), role: 'user' },
           origin: { kind: 'human' },
           parent_tool_use_id: null,
           session_id: apiId(sessionId),

@@ -818,6 +818,57 @@ async function drainRcOut(reason) {
   }
 }
 
+// ---------- attachments from the phone ----------
+// The relay pushes a message-with-files as frames over the socket: {rcfile} header, one or more
+// {rcfilechunk} per file, {rcfileend}. Files are written to the inbox on the PC; images ALSO go
+// into the agent's message as image blocks (the API accepts them, verified 2026-09-05), and the
+// text tells the agent where each file landed so it can open non-images itself.
+const INBOX_DIR = path.join(SPAWN_DIR, 'inbox');
+const rcFileJobs = new Map();    // id -> { head, chunks: [[...]], at }
+function onRcFileFrame(m) {
+  const id = String(m.id || '');
+  if (!id) return;
+  if (m.type === 'rcfile') { rcFileJobs.set(id, { head: m, chunks: (m.files || []).map(() => []), at: Date.now() }); return; }
+  const job = rcFileJobs.get(id);
+  if (!job) return;
+  if (m.type === 'rcfilechunk') { if (job.chunks[m.file]) job.chunks[m.file][m.part] = String(m.data || ''); return; }
+  if (m.type === 'rcfileend') { rcFileJobs.delete(id); deliverRcFile(job).catch((e) => log('rc-file: ' + e.message)); }
+  // a job whose end never arrives (socket dropped mid-transfer) is dropped after 5 minutes
+  for (const [k, j] of rcFileJobs) if (Date.now() - j.at > 300000) rcFileJobs.delete(k);
+}
+const safeName = (n) => String(n || 'file').replace(/[\\/:*?"<>|]+/g, '_').replace(/\s+/g, ' ').trim().slice(0, 120) || 'file';
+async function deliverRcFile(job) {
+  const h = job.head;
+  fs.mkdirSync(INBOX_DIR, { recursive: true });
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  const saved = [];
+  const blocks = [];
+  (h.files || []).forEach((f, i) => {
+    const b64 = (job.chunks[i] || []).join('');
+    if (!b64) return;
+    const name = safeName(f.name);
+    const full = path.join(INBOX_DIR, stamp + '-' + name);
+    try { fs.writeFileSync(full, Buffer.from(b64, 'base64')); } catch (e) { log('rc-file: write failed ' + full + ': ' + e.message); return; }
+    saved.push({ name, path: full, type: f.type || '' });
+    if (/^image\/(png|jpeg|gif|webp)$/.test(f.type || '')) blocks.push({ type: 'image', source: { type: 'base64', media_type: f.type, data: b64 } });
+  });
+  const lines = [];
+  if (h.text) lines.push(String(h.text));
+  if (saved.length) {
+    lines.push('', 'Attached from the phone (saved on this PC):');
+    for (const s of saved) lines.push('- ' + s.path);
+  }
+  const content = [{ type: 'text', text: lines.join('\n') || '(attachment)' }].concat(blocks);
+  const res = await rc.send({ sessionId: h.sessionId, text: lines.join('\n'), uuid: h.uuid, content });
+  log('rc-file: ' + saved.length + ' file(s) -> ' + h.sessionId + ' ' + (res.ok ? 'delivered' : 'FAILED ' + res.error));
+  if (!res.ok) {
+    try {
+      await fetch(RELAY + '/rc/push', { method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId: h.sessionId, messages: [{ role: 'system', text: 'Could not deliver the attachment: ' + res.error, ts: Date.now(), uuid: h.uuid + ':err' }], ts: Date.now() }) });
+    } catch (_) {}
+  }
+}
+
 // ---------- remote-control: a session whose terminal has closed ----------
 // rc-bridge only learns a session is dead when the Anthropic API 404s its event stream, and
 // that does NOT happen when a terminal tab closes: the cloud session record outlives the local
@@ -972,6 +1023,8 @@ function connect() {
     if (!m) return;
     if (m.type === 'wake') drainOnce('wake');
     else if (m.type === 'wantStats') pushStats();
+    // A message with attachments arrives as frames: header, N chunks per file, end.
+    else if (m.type === 'rcfile' || m.type === 'rcfilechunk' || m.type === 'rcfileend') onRcFileFrame(m);
     // Which sessions currently have a chat page open. Pushed the moment one opens or closes, so
     // we start/stop the SSE stream immediately without ever polling for the list.
     else if (m.type === 'rcsubs') setRcSubs(m.ids);
