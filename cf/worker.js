@@ -3,6 +3,7 @@
 // single Durable Object (strongly consistent, instant read-after-write — unlike KV, which
 // caches reads at the edge for up to 60s and would make the poller miss fresh tasks).
 import HTML from './app.html';
+import HOME from './home.html';
 import AGENTS from './agents.html';
 import CHAT from './chat.html';
 import RCCHAT from './rcchat.html';
@@ -126,8 +127,13 @@ export default {
 
     if (p === '/health') return json({ ok: true });
 
-    // button page (capability URL)
+    // front door: four tiles, one per section (capability URL)
     if (SECRET && p === '/p/' + SECRET) {
+      const html = HOME.replaceAll('__SECRET__', SECRET).replaceAll('__START__', '/p/' + SECRET);
+      return new Response(html, { headers: { 'content-type': 'text/html;charset=utf-8', 'cache-control': 'no-store' } });
+    }
+    // spawn page (capability URL)
+    if (SECRET && p === '/p/' + SECRET + '/new') {
       const html = HTML.replaceAll('__SECRET__', SECRET).replaceAll('__START__', '/p/' + SECRET);
       return new Response(html, { headers: { 'content-type': 'text/html;charset=utf-8', 'cache-control': 'no-store' } });
     }

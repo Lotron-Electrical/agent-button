@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1" />
+<meta name="theme-color" content="#0d0d0d" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<link rel="manifest" href="__START__/manifest.webmanifest" />
+<link rel="icon" href="/icon-192.png" />
+<link rel="apple-touch-icon" href="/icon-192.png" />
+<title>Agents</title>
+<style>
+  /* The front door. Four buttons, one word each, nothing to read. Every section of the app is
+     one tap from here, and every section's header taps back to here. */
+  :root{ --bg:#0d0d0d; --panel:#161616; --line:#2a2a2a; --ink:#ece7e1; --dim:#8a847c; --accent:#C15F3C; --accent2:#e0794f; --ok:#5fb87a }
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent}
+  html,body{margin:0; height:100%}
+  body{
+    background:radial-gradient(120% 80% at 50% -10%, #1a1411 0%, var(--bg) 55%);
+    color:var(--ink); font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+    min-height:100dvh; display:flex; flex-direction:column;
+    padding:max(18px,env(safe-area-inset-top)) 16px calc(18px + env(safe-area-inset-bottom));
+  }
+  header{display:flex; align-items:center; gap:10px; margin-bottom:8px}
+  .dot{width:10px; height:10px; border-radius:50%; background:var(--accent); box-shadow:0 0 12px var(--accent)}
+  h1{font-size:17px; margin:0; letter-spacing:.5px; font-weight:600; flex:1}
+  h1 span{color:var(--dim); font-weight:400}
+  .grid{flex:1; display:grid; grid-template-columns:1fr 1fr; grid-auto-rows:1fr; gap:14px; align-content:stretch; padding:8px 0}
+  a.tile{
+    display:flex; align-items:center; justify-content:center; text-decoration:none;
+    font-size:22px; font-weight:700; letter-spacing:.5px; border-radius:18px; min-height:120px;
+    background:var(--panel); border:1px solid var(--line); color:var(--ink);
+  }
+  a.tile:link, a.tile:visited{color:var(--ink)}
+  a.tile:active{border-color:var(--accent); background:#1d1d1d}
+  a.tile.primary{background:linear-gradient(135deg,var(--accent2),var(--accent)); border-color:transparent; box-shadow:0 10px 30px rgba(193,95,60,.28)}
+  a.tile.primary:link, a.tile.primary:visited{color:#1a0f0a}
+  .n{position:absolute; top:12px; right:14px; font-size:12px; font-weight:600; color:var(--ok); border:1px solid rgba(95,184,122,.35); background:rgba(95,184,122,.12); padding:2px 8px; border-radius:20px}
+  a.tile{position:relative}
+</style>
+</head>
+<body>
+  <header><div class="dot"></div><h1>AGENTS <span>// your PC</span></h1></header>
+  <nav class="grid">
+    <a class="tile primary" href="__START__/new">New</a>
+    <a class="tile" href="__START__/agents"><span class="n" id="nagents" hidden></span>Agents</a>
+    <a class="tile" href="__START__/agents?view=relays"><span class="n" id="nrelays" hidden></span>Relays</a>
+    <a class="tile" href="__START__/agents?view=account">Account</a>
+  </nav>
+<script>
+// The only text beyond the four words: a live count on the tiles that have something in them.
+const SECRET = "__SECRET__";
+async function counts(){
+  try {
+    const d = await (await fetch('/agents', { headers: { Authorization: 'Bearer ' + SECRET } })).json();
+    const a = (d.agents||[]).length + (d.external||[]).length;
+    const r = (d.solves||[]).filter(s => s.status!=='solved' && s.status!=='stopped').length;
+    const na = document.getElementById('nagents'), nr = document.getElementById('nrelays');
+    na.textContent = a; na.hidden = !a;
+    nr.textContent = r; nr.hidden = !r;
+  } catch (_) {}
+}
+counts(); setInterval(counts, 5000);
+</script>
+</body>
+</html>

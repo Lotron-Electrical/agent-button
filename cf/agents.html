@@ -119,8 +119,8 @@
 <body>
   <header>
     <div class="dot"></div>
-    <h1>AGENTS <span>// your PC</span></h1>
-    <a class="spawnlink" href="__START__">+ New</a>
+    <h1><a id="hometitle" href="__START__" style="color:inherit;text-decoration:none">AGENTS</a> <span>// your PC</span></h1>
+    <a class="spawnlink" href="__START__/new">+ New</a>
   </header>
   <div class="stats" id="stats" style="display:none"></div>
   <div class="sub" id="sub">loading…</div>
@@ -130,7 +130,6 @@
   <div id="ext"></div>
   <div id="list"></div>
   <div id="solveswrap"></div>
-  <div class="foot">tap an agent to chat · × to close · refreshes every 3s</div>
   <div id="sheet" aria-hidden="true">
     <div class="bar"><button id="sheetclose" type="button">‹ Agents</button><span class="sname" id="sheetname"></span></div>
     <iframe id="sheetframe" title="agent chat"></iframe>
@@ -140,6 +139,10 @@
 const SECRET = "__SECRET__";
 const START = "__START__";
 const $ = (id) => document.getElementById(id);
+const VIEW = new URLSearchParams(location.search).get('view') || 'agents';   // agents | relays | account
+$('hometitle').textContent = VIEW.toUpperCase();
+document.title = VIEW.charAt(0).toUpperCase() + VIEW.slice(1);
+if (VIEW !== 'agents') $('sub').textContent = '';
 
 function api(p, opts){ return fetch(p, { ...(opts||{}), headers: { Authorization: 'Bearer ' + SECRET, ...((opts&&opts.headers)||{}) } }); }
 function ago(ts){ if(!ts) return ''; let s=Math.max(0,Math.round((Date.now()-ts)/1000)); if(s<60)return s+'s'; if(s<3600)return Math.round(s/60)+'m'; return Math.round(s/3600)+'h'; }
@@ -265,7 +268,8 @@ function renderSolves(solves){
     return '<div class="extcard"><div class="top"><span class="name">'+esc(s.title||s.id)+'</span><span class="badge '+st.cls+'">'+esc(st.label)+'</span><button class="close sdel" data-id="'+esc(s.id)+'" aria-label="remove relay">✕</button></div>'+note+'<div class="meta">'+esc(line)+'</div>'+actions+'</div>';
   };
   // Remember whether the past list was open, so the 3s refresh does not snap it shut.
-  const wasOpen = !!(document.getElementById('pastsolves') && document.getElementById('pastsolves').open);
+  const el = document.getElementById('pastsolves');
+  const wasOpen = el ? el.open : VIEW === 'relays';   // on the Relays screen the history starts open
   $('solveswrap').innerHTML =
     (live.length ? '<div class="seclabel">Solve relays · working now</div>' + live.map(card).join('') : '') +
     (past.length ? '<details id="pastsolves" class="past"'+(wasOpen?' open':'')+'><summary class="seclabel">Past relays · '+past.length+' solved or stopped</summary>'+past.map(card).join('')+'</details>' : '');
@@ -327,11 +331,13 @@ async function refresh(){
   const total = agents.length + external.length;
   const working = agents.filter(a => (a.status==='thinking'||a.status==='busy')).length
                 + external.filter(a => (a.status==='busy'||a.status==='thinking')).length;
-  renderStats(data.stats);
+  // One section per screen. The home page links here with ?view=agents|relays|account and
+  // this page shows only that section, so nothing on screen competes with what was tapped.
+  if (VIEW === 'account') { renderStats(data.stats); $('sub').textContent = ''; return; }
+  if (VIEW === 'relays')  { renderSolves(data.solves || []); $('sub').textContent = ''; return; }
   $('sub').innerHTML = total+' agent'+(total===1?'':'s')+(working?' · '+working+' working':'');
   renderExternal(external, data.rcarm || {});
   render(agents, external.length > 0);
-  renderSolves(data.solves || []);
 }
 refresh();
 setInterval(refresh, 3000);
