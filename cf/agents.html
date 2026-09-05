@@ -440,7 +440,8 @@ function tileState(a, arm){
     if (s==='fail') return { cls:'off failed', word:'retry', act:'arm' };
     return { cls:'off', word:'connect', act:'arm' };
   }
-  if (st==='busy'||st==='thinking') return { cls:'busy', word:'working', act:'chat' };
+  // 'shell' = the agent is running a command: that is work, not idleness.
+  if (st==='busy'||st==='thinking'||st==='shell') return { cls:'busy', word:'working', act:'chat' };
   if (st==='waiting') return { cls:'waiting', word:'waiting', act:'chat' };
   return { cls:'idle', word: st||'live', act:'chat' };
 }
