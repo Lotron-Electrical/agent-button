@@ -121,8 +121,14 @@
   body.gridview #sub{display:none}
   body.gridview .stats{flex:none; margin-bottom:10px}
   .stats.compact{padding:8px 12px}
-  .stats.compact .srow{margin:3px 0}
+  .stats.compact .srow{margin:4px 0; font-size:11px}
   .stats.compact .shost{margin-top:4px}
+  /* two gauges per row: label | bar | value, twice */
+  .srow.two{gap:14px}
+  .srow.two .g{flex:1; min-width:0; display:flex; align-items:center; gap:6px}
+  .srow.two .g .lab{width:auto; min-width:30px; flex:none}
+  .srow.two .g .bar{flex:1; min-width:24px}
+  .srow.two .g .val{min-width:0; flex:none; font-size:11px}
   /* Fixed page: cols x rows tiles, every one on screen. More agents than that = more pages,
      swiped or tapped through with the dots. The layout is the user's choice (header button). */
   body.gridview #ext{flex:1; min-height:0; display:grid; grid-template-columns:repeat(var(--cols,2),1fr); grid-template-rows:repeat(var(--rows,3),1fr); gap:12px; padding:4px 0; touch-action:pan-y}
@@ -130,6 +136,34 @@
   body.gridview[data-cols="3"] .tile .tname{font-size:12px}
   body.gridview[data-cols="3"] .tile{padding:8px; gap:5px}
   .layoutbtn{font:inherit; cursor:pointer; background:none}
+  /* Loading: the page draws its shape at once (grey tiles, shimmering) and real tiles fade in
+     over it, so a slow relay reads as "loading", never as "broken" or "empty". */
+  @keyframes shimmer{0%{background-position:-200% 0}100%{background-position:200% 0}}
+  @keyframes rise{from{opacity:0; transform:translateY(6px)}to{opacity:1; transform:none}}
+  .skel{border-radius:16px; border:1px solid var(--line);
+        background:linear-gradient(100deg, var(--panel) 30%, #202020 50%, var(--panel) 70%); background-size:200% 100%;
+        animation:shimmer 1.4s linear infinite}
+  .skel.row{height:8px; border-radius:6px; flex:1}
+  .tile{animation:rise .28s ease-out both}
+  .tile:nth-child(2){animation-delay:.04s} .tile:nth-child(3){animation-delay:.08s} .tile:nth-child(4){animation-delay:.12s}
+  .tile:nth-child(5){animation-delay:.16s} .tile:nth-child(6){animation-delay:.20s} .tile:nth-child(n+7){animation-delay:.24s}
+  /* tile editor */
+  .tile .pin{position:absolute; top:6px; left:10px; color:var(--warn); font-size:14px}
+  #editor{position:fixed; inset:0; z-index:60; background:rgba(0,0,0,.6); display:flex; align-items:flex-end; justify-content:center; padding:16px}
+  #editor[hidden]{display:none}
+  .edbox{width:100%; max-width:480px; background:var(--panel); border:1px solid var(--line); border-radius:16px; padding:14px; display:flex; flex-direction:column; gap:12px; margin-bottom:env(safe-area-inset-bottom)}
+  #edname{font:inherit; font-size:16px; padding:12px; border-radius:11px; border:1px solid var(--line); background:var(--panel2); color:var(--ink); width:100%}
+  #edname:focus{border-color:var(--accent); outline:none}
+  .prio{display:flex; gap:8px}
+  .prio button{flex:1; font:inherit; font-size:14px; font-weight:600; padding:11px; border-radius:11px; border:1px solid var(--line); background:var(--panel2); color:var(--dim)}
+  .prio button.on{color:var(--accent2); border-color:rgba(224,121,79,.5); background:rgba(224,121,79,.12)}
+  .edrow{display:flex; gap:8px}
+  .edrow button{flex:1; font:inherit; font-size:15px; font-weight:600; padding:12px; border-radius:11px; border:1px solid var(--line); background:var(--panel2); color:var(--ink)}
+  .edrow button.primary{background:linear-gradient(135deg,var(--accent2),var(--accent)); border-color:transparent; color:#1a0f0a}
+  #sheet .spin{position:absolute; inset:0; display:flex; align-items:center; justify-content:center; pointer-events:none; color:var(--accent2)}
+  #sheet .spin i{width:28px; height:28px; border-radius:50%; border:3px solid var(--line); border-top-color:var(--accent2); animation:turn .8s linear infinite}
+  @keyframes turn{to{transform:rotate(360deg)}}
+  #sheet.loaded .spin{display:none}
   .pager{flex:none; display:flex; justify-content:center; align-items:center; gap:10px; padding:10px 0 2px}
   .pager:empty{display:none}
   .pdot{width:8px; height:8px; border-radius:50%; background:var(--line); border:0; padding:0}
@@ -190,8 +224,17 @@
   <div class="pager" id="pager"></div>
   <div id="list"></div>
   <div id="solveswrap"></div>
+  <!-- tile editor: name + priority, opened by long-press -->
+  <div id="editor" hidden>
+    <div class="edbox">
+      <input id="edname" type="text" maxlength="60" placeholder="Name" autocomplete="off" />
+      <div class="prio"><button type="button" data-p="2">★ High</button><button type="button" data-p="1">Normal</button><button type="button" data-p="0">Low</button></div>
+      <div class="edrow"><button type="button" id="edcancel">Cancel</button><button type="button" id="edsave" class="primary">Save</button></div>
+    </div>
+  </div>
   <div id="sheet" aria-hidden="true">
     <div class="bar"><button id="sheetclose" type="button">‹ Agents</button><span class="sname" id="sheetname"></span></div>
+    <div class="spin"><i></i></div>
     <iframe id="sheetframe" title="agent chat"></iframe>
   </div>
 
@@ -221,13 +264,13 @@ function renderStats(st, compact){
   el.style.display='block';
   el.classList.toggle('compact', !!compact);
   if (compact) {
-    // Two bars and the host line, nothing else: the grid below needs the height.
-    const cpu = Math.max(0,Math.min(100, st.cpuPct||0)), ram = Math.max(0,Math.min(100, st.ramPct||0));
+    // Same three lines of height as before, twice the information: each row holds two gauges.
+    //   CPU | GPU      RAM | VRAM      C: | E:
+    // Host and uptime move up into the page title so they cost no row at all.
+    el.innerHTML = compactStatsHtml(st);
     const fresh = (Date.now()-st.ts) < 20000;
-    el.innerHTML =
-      '<div class="srow"><span class="lab">CPU</span><div class="bar"><i class="'+(cpu>85?'hot':'')+'" style="width:'+cpu+'%"></i></div><span class="val">'+cpu+'%</span></div>'+
-      '<div class="srow"><span class="lab">RAM</span><div class="bar"><i class="'+(ram>88?'hot':'')+'" style="width:'+ram+'%"></i></div><span class="val">'+(st.ramUsedGB||0)+' / '+(st.ramTotalGB||0)+' GB</span></div>'+
-      '<div class="shost'+(fresh?'':' off')+'"><span class="live"></span>'+esc(st.host||'PC')+(fresh?' · online':' · last seen '+ago(st.ts)+' ago')+(st.uptimeH?' · up '+st.uptimeH+'h':'')+'</div>';
+    const sub = document.querySelector('h1 span');
+    if (sub) sub.textContent = '// '+(st.host||'PC')+(fresh?'':' · offline')+(st.uptimeH?' · up '+st.uptimeH+'h':'');
     return;
   }
   const fresh = (Date.now()-st.ts) < 20000;
@@ -238,6 +281,21 @@ function renderStats(st, compact){
     '<div class="srow"><span class="lab">RAM</span><div class="bar"><i class="'+(ram>88?'hot':'')+'" style="width:'+ram+'%"></i></div><span class="val">'+(st.ramUsedGB||0)+' / '+(st.ramTotalGB||0)+' GB</span></div>'+
     '<div class="shost'+(fresh?'':' off')+'"><span class="live"></span>'+esc(st.host||'PC')+(fresh?' · online '+ago(st.ts)+' ago':' · last seen '+ago(st.ts)+' ago')+(st.uptimeH?' · up '+st.uptimeH+'h':'')+'</div>'+
     accountHtml(st.account);
+}
+
+// One gauge: label, bar, value. `hot` colours the bar when a resource is nearly full.
+function gauge(lab, pct, val, hotAt){
+  const p = Math.max(0, Math.min(100, Math.round(pct||0)));
+  return '<span class="g"><span class="lab">'+lab+'</span><span class="bar"><i class="'+(p>=(hotAt||85)?'hot':'')+'" style="width:'+p+'%"></i></span><span class="val">'+val+'</span></span>';
+}
+const gb = (n) => (n>=1000 ? (n/1000).toFixed(1)+'T' : Math.round(n)+'G');
+function compactStatsHtml(st){
+  const g = st.gpu, d = st.drives || [];
+  const rows = [];
+  rows.push(gauge('CPU', st.cpuPct, (st.cpuPct||0)+'%') + (g ? gauge('GPU', g.pct, g.pct+'%'+(g.tempC?' '+g.tempC+'°':'')) : ''));
+  rows.push(gauge('RAM', st.ramPct, (st.ramUsedGB||0)+'/'+(st.ramTotalGB||0)+'G', 88) + (g ? gauge('VRAM', g.vramTotalGB ? 100*g.vramUsedGB/g.vramTotalGB : 0, g.vramUsedGB+'/'+g.vramTotalGB+'G', 90) : ''));
+  if (d.length) rows.push(d.slice(0,2).map(x => gauge(x.letter+':', x.pct, gb(x.totalGB - x.freeGB)+'/'+gb(x.totalGB), 90)).join(''));
+  return rows.map(r => '<div class="srow two">'+r+'</div>').join('');
 }
 
 // Which Claude subscription every agent on this PC is signed in as. It matters because the PC
@@ -328,7 +386,10 @@ function tileState(a, arm){
 // rename), else by tab title. Long-press a tile to rename it.
 let ALIASES = {};
 const aliasKey = (a) => a.bridgeSessionId || ('tab:' + a.name);
-const shown = (a) => ALIASES[aliasKey(a)] || a.name;
+// An entry is {name, prio} now; older entries were the bare name string.
+const meta = (a) => { const v = ALIASES[aliasKey(a)]; return typeof v === 'string' ? { name: v, prio: 1 } : (v || { name: '', prio: 1 }); };
+const shown = (a) => meta(a).name || a.name;
+const prioOf = (a) => { const p = meta(a).prio; return p == null ? 1 : p; };
 // ---- page layout: how many tiles fit on one screen, and paging through the rest ----
 const LAYOUTS = [[2,2],[2,3],[3,3],[2,4]];        // [cols, rows]
 let layoutIdx = 1;
@@ -346,14 +407,28 @@ $('layoutbtn').addEventListener('click', () => {
   try { localStorage.setItem('agents.layout', String(layoutIdx)); } catch(_){}
   page = 0; applyLayout(); refresh();
 });
-if (VIEW === 'agents') { $('layoutbtn').hidden = false; applyLayout(); }
+if (VIEW === 'agents') {
+  $('layoutbtn').hidden = false; applyLayout();
+  // Skeleton first paint: one grey tile per slot, and a grey stats strip, until the relay answers.
+  const [c, r] = LAYOUTS[layoutIdx];
+  $('ext').innerHTML = Array.from({length: c * r}, () => '<div class="skel"></div>').join('');
+  $('stats').style.display = 'block';
+  $('stats').classList.add('compact');
+  $('stats').innerHTML = '<div class="srow"><span class="lab">CPU</span><div class="skel row"></div><span class="val">&nbsp;</span></div>'+
+                         '<div class="srow"><span class="lab">RAM</span><div class="skel row"></div><span class="val">&nbsp;</span></div>'+
+                         '<div class="shost"><span class="live" style="opacity:.3"></span>&nbsp;</div>';
+}
 let lastTiles = [];
+let lastDrawn = '';
 function drawPage(){
   const per = LAYOUTS[layoutIdx][0] * LAYOUTS[layoutIdx][1];
   const pages = Math.max(1, Math.ceil(lastTiles.length / per));
   if (page > pages - 1) page = pages - 1;
   if (page < 0) page = 0;
-  $('ext').innerHTML = lastTiles.slice(page * per, (page + 1) * per).join('');
+  // Only touch the DOM when something changed: the 3s refresh must not re-run the fade-in or
+  // steal a tap that was mid-press on a tile.
+  const html = lastTiles.slice(page * per, (page + 1) * per).join('');
+  if (html !== lastDrawn) { $('ext').innerHTML = html; lastDrawn = html; }
   $('pager').innerHTML = pages > 1
     ? '<button class="parrow" data-go="-1"'+(page===0?' disabled':'')+'>‹</button>'
       + Array.from({length: pages}, (_, i) => '<button class="pdot'+(i===page?' on':'')+'" data-page="'+i+'" aria-label="page '+(i+1)+'"></button>').join('')
@@ -376,11 +451,15 @@ $('ext').addEventListener('touchend', (e) => {
 });
 
 function renderGrid(external, agents, rcarm){
+  // High-priority agents first, then the working ones, then everything else in relay order.
+  const rank = (a) => prioOf(a) * 10 + ((a.status === 'busy' || a.status === 'thinking') ? 1 : 0);
+  external = external.slice().sort((x, y) => rank(y) - rank(x));
   const tiles = external.map(a => {
     const t = tileState(a, (rcarm||{})[a.name]);
     const label = shown(a);
-    const inner = '<span class="rcdot"></span><span class="tname">'+esc(label)+'</span><span class="tstate">'+esc(t.word)+'</span>';
-    const keyAttr = ' data-key="'+esc(aliasKey(a))+'" data-label="'+esc(label)+'"';
+    const pr = prioOf(a);
+    const inner = '<span class="rcdot"></span>'+(pr===2?'<span class="pin">★</span>':'')+'<span class="tname">'+esc(label)+'</span><span class="tstate">'+esc(t.word)+'</span>';
+    const keyAttr = ' data-key="'+esc(aliasKey(a))+'" data-label="'+esc(label)+'" data-prio="'+pr+'"'+(pr===0?' style="opacity:.75"':'');
     if (t.act==='chat') {
       const url = START+'/rc?id='+encodeURIComponent(a.bridgeSessionId)+'&name='+encodeURIComponent(label);
       return '<a class="tile openchat '+t.cls+'" href="'+url+'" data-name="'+esc(label)+'"'+keyAttr+'>'+inner+'</a>';
@@ -434,6 +513,8 @@ function renderExternal(external, rcarm){
 const sheet = $('sheet'), frame = $('sheetframe');
 function openChat(url, name){
   $('sheetname').textContent = name || '';
+  sheet.classList.remove('loaded');
+  frame.onload = () => sheet.classList.add('loaded');
   frame.src = url;
   sheet.classList.add('open'); sheet.setAttribute('aria-hidden','false');
   document.body.style.overflow = 'hidden';
@@ -454,16 +535,28 @@ window.addEventListener('message', (ev) => { if (ev.data === 'rc-close') $('shee
 let pressTimer = null, pressed = null, renamed = false;
 function armPress(el){ clearTimeout(pressTimer); pressed = el; renamed = false; pressTimer = setTimeout(() => { renamed = true; renameTile(el); }, 600); }
 function cancelPress(){ clearTimeout(pressTimer); pressTimer = null; }
-async function renameTile(el){
-  const key = el.dataset.key; if (!key) return;
-  const cur = el.dataset.label || '';
-  const name = prompt('Name this agent', cur);
-  if (name === null) return;
-  const trimmed = name.trim();
-  if (trimmed) ALIASES[key] = trimmed; else delete ALIASES[key];
-  refresh();
-  try { await api('/alias', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ key, name: trimmed }) }); } catch(_){}
+// Long-press opens a small editor: the agent's name and its priority (High / Normal / Low).
+// High sits first on the grid, Low last and dimmed.
+let editKey = null;
+function renameTile(el){
+  editKey = el.dataset.key; if (!editKey) return;
+  $('edname').value = el.dataset.label || '';
+  setPrio(+el.dataset.prio || 1);
+  $('editor').hidden = false;
+  setTimeout(() => $('edname').select(), 50);
 }
+function setPrio(p){ $('editor').dataset.prio = p; [...document.querySelectorAll('.prio button')].forEach(b => b.classList.toggle('on', +b.dataset.p === p)); }
+$('editor').addEventListener('click', async (e) => {
+  const pb = e.target.closest('.prio button'); if (pb) { setPrio(+pb.dataset.p); return; }
+  if (e.target.id === 'edcancel' || e.target === $('editor')) { $('editor').hidden = true; return; }
+  if (e.target.id !== 'edsave') return;
+  const name = $('edname').value.trim(), prio = +$('editor').dataset.prio;
+  ALIASES[editKey] = { name, prio };
+  $('editor').hidden = true;
+  refresh();
+  try { await api('/alias', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ key: editKey, name, prio }) }); } catch(_){}
+});
+$('edname').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); $('edsave').click(); } });
 $('ext').addEventListener('pointerdown', (e) => { const t = e.target.closest('.tile'); if (t && t.dataset.key) armPress(t); });
 $('ext').addEventListener('pointerup', cancelPress);
 $('ext').addEventListener('pointercancel', cancelPress);

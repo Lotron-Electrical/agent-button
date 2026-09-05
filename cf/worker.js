@@ -605,8 +605,12 @@ export class QueueDO {
       const key = String(b.key || '').trim().slice(0, 120);
       if (!key) return json({ error: 'key required' }, 400);
       const name = String(b.name || '').trim().slice(0, 60);
+      // prio: 2 high, 1 normal (default), 0 low. Sorted first on the grid.
+      const prio = b.prio == null ? null : Math.max(0, Math.min(2, parseInt(b.prio, 10) || 0));
       const al = (await this.storage.get('aliases')) || {};
-      if (name) al[key] = name; else delete al[key];
+      const cur = typeof al[key] === 'string' ? { name: al[key] } : (al[key] || {});
+      const next = { name: b.name === undefined ? (cur.name || '') : name, prio: prio === null ? (cur.prio == null ? 1 : cur.prio) : prio };
+      if (!next.name && next.prio === 1) delete al[key]; else al[key] = next;
       // Cap the map: a key whose agent is long gone is dead weight, and 200 renames is plenty.
       const keys = Object.keys(al); if (keys.length > 200) for (const k of keys.slice(0, keys.length - 200)) delete al[k];
       await this.storage.put('aliases', al);

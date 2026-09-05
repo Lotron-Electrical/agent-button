@@ -527,12 +527,47 @@ async function readUsage() {
   return val;
 }
 
+// ---------- GPU (nvidia-smi) and drive space ----------
+// nvidia-smi is a ~100ms process; cache it 5s so a fast-polling dashboard cannot spawn it in a
+// loop. Drives come from fs.statfs, which is free. Both are null when unavailable so the page
+// simply leaves that bar out.
+const { execFile } = require('child_process');
+let gpuCache = { at: 0, val: null };
+function readGpu() {
+  return new Promise((resolve) => {
+    if (Date.now() - gpuCache.at < 5000) return resolve(gpuCache.val);
+    execFile('nvidia-smi', ['--query-gpu=name,utilization.gpu,memory.used,memory.total,temperature.gpu', '--format=csv,noheader,nounits'],
+      { timeout: 4000, windowsHide: true }, (err, out) => {
+        let val = null;
+        if (!err && out) {
+          const f = String(out).trim().split('\n')[0].split(',').map((x) => x.trim());
+          if (f.length >= 4) val = { name: f[0].replace(/^NVIDIA GeForce /, ''), pct: +f[1] || 0, vramUsedGB: +(f[2] / 1024).toFixed(1), vramTotalGB: +(f[3] / 1024).toFixed(1), tempC: +f[4] || null };
+        }
+        gpuCache = { at: Date.now(), val };
+        resolve(val);
+      });
+  });
+}
+function readDrives() {
+  const out = [];
+  for (const letter of ['C', 'E']) {
+    try {
+      const s = fs.statfsSync(letter + ':/');
+      const total = s.blocks * s.bsize, free = s.bavail * s.bsize;
+      out.push({ letter, totalGB: +(total / 1e9).toFixed(0), freeGB: +(free / 1e9).toFixed(0), pct: total ? Math.round(100 * (1 - free / total)) : 0 });
+    } catch (_) {}
+  }
+  return out;
+}
+
 async function reportStats() {
   const total = os.totalmem() / 1073741824, free = os.freemem() / 1073741824;
   const stats = {
     host: os.hostname(),
     account: readAccount(),
     usage: await readUsage(),
+    gpu: await readGpu(),
+    drives: readDrives(),
     cpuPct: cpuPercent(),
     cores: os.cpus().length,
     ramUsedGB: +(total - free).toFixed(1),
