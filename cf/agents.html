@@ -98,6 +98,21 @@
   .rcarm.workin{color:var(--warn); border-color:rgba(217,168,79,.45); background:rgba(217,168,79,.10)}
   .rcarm.bad{color:var(--err); border-color:rgba(217,101,90,.45); background:rgba(217,101,90,.10)}
   .rcwhy{font-size:11px; color:var(--dim); text-align:center; margin-top:6px; line-height:1.45; overflow-wrap:anywhere}
+  /* remote-control state, at a glance, on every terminal card */
+  .rcpill{font-size:10px; font-weight:600; letter-spacing:.5px; text-transform:uppercase; padding:3px 8px; border-radius:20px; white-space:nowrap}
+  .rcpill.on{color:var(--ok); border:1px solid rgba(95,184,122,.35); background:rgba(95,184,122,.12)}
+  .rcpill.off{color:var(--dim); border:1px solid var(--line); background:var(--panel2)}
+  /* The chat opens IN this page: a full-height sheet over the list, so the dashboard and the
+     conversation are one screen and the list is one swipe-down away. */
+  #sheet{position:fixed; inset:0; z-index:50; display:none; flex-direction:column; background:var(--bg)}
+  #sheet.open{display:flex}
+  /* The chat page brings its own header (name, live status, back, Claude link), so this bar is
+     kept only as the close target the back gesture and the iframe's ‹ post to. Two headers
+     stacked was a wasted 60px of phone. */
+  #sheet .bar{display:none; flex:none; align-items:center; gap:10px; padding:calc(8px + env(safe-area-inset-top)) 12px 8px; border-bottom:1px solid var(--line); background:linear-gradient(180deg,#1a1411,#0d0d0d)}
+  #sheet .bar .sname{flex:1; font-size:15px; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+  #sheet .bar button{font:inherit; font-size:13px; color:var(--accent2); background:var(--panel); border:1px solid var(--line); border-radius:9px; padding:7px 12px}
+  #sheet iframe{flex:1; border:0; width:100%; background:var(--bg)}
   .foot{text-align:center; color:var(--dim); font-size:11px; margin-top:18px; opacity:.7}
 </style>
 </head>
@@ -116,6 +131,10 @@
   <div id="list"></div>
   <div id="solveswrap"></div>
   <div class="foot">tap an agent to chat · × to close · refreshes every 3s</div>
+  <div id="sheet" aria-hidden="true">
+    <div class="bar"><button id="sheetclose" type="button">‹ Agents</button><span class="sname" id="sheetname"></span></div>
+    <iframe id="sheetframe" title="agent chat"></iframe>
+  </div>
 
 <script>
 const SECRET = "__SECRET__";
@@ -186,15 +205,39 @@ function renderExternal(external, rcarm){
     // In-app chat is the primary action wherever the bridge can address the session. The
     // claude.ai link stays as the permanent fallback for when that private API moves under us.
     const claudeLink = (cls) => '<a class="'+cls+'" href="'+esc(a.chat)+'" target="_blank" rel="noopener">Open in Claude ↗</a>';
+    const rcUrl = START+'/rc?id='+encodeURIComponent(a.bridgeSessionId||'')+'&name='+encodeURIComponent(a.name||'');
     const action = a.bridgeSessionId
-      ? '<a class="chatbtn" href="'+START+'/rc?id='+encodeURIComponent(a.bridgeSessionId)+'&name='+encodeURIComponent(a.name||'')+'">Chat here ›</a>'
+      ? '<a class="chatbtn openchat" href="'+rcUrl+'" data-name="'+esc(a.name||'')+'">Chat here ›</a>'
         + (a.chat ? claudeLink('extlink extsecond') : '')
       : armHtml(a.name, (rcarm||{})[a.name]);
-    return '<div class="extcard"><div class="top"><span class="name">'+esc(a.name)+'</span><span class="badge '+st.cls+'">'+esc(st.label)+'</span></div>'+(meta?'<div class="meta">'+esc(meta)+'</div>':'')+action+'</div>';
+    const rc = a.bridgeSessionId ? '<span class="rcpill on">RC on</span>' : '<span class="rcpill off">RC off</span>';
+    return '<div class="extcard"><div class="top"><span class="name">'+esc(a.name)+'</span>'+rc+'<span class="badge '+st.cls+'">'+esc(st.label)+'</span></div>'+(meta?'<div class="meta">'+esc(meta)+'</div>':'')+action+'</div>';
   }).join('');
 }
 
+// Chat opens in the sheet, over this list, instead of navigating away. The href stays real so
+// a long-press / open-in-new-tab still works and so nothing breaks if the sheet ever fails.
+const sheet = $('sheet'), frame = $('sheetframe');
+function openChat(url, name){
+  $('sheetname').textContent = name || '';
+  frame.src = url;
+  sheet.classList.add('open'); sheet.setAttribute('aria-hidden','false');
+  document.body.style.overflow = 'hidden';
+  history.pushState({ chat: 1 }, '');
+}
+function closeChat(){
+  if (!sheet.classList.contains('open')) return;
+  sheet.classList.remove('open'); sheet.setAttribute('aria-hidden','true');
+  document.body.style.overflow = '';
+  setTimeout(() => { frame.src = 'about:blank'; }, 150);   // drop the long-poll once hidden
+}
+$('sheetclose').addEventListener('click', () => { if (history.state && history.state.chat) history.back(); else closeChat(); });
+window.addEventListener('popstate', closeChat);            // the phone back gesture closes it
+window.addEventListener('message', (ev) => { if (ev.data === 'rc-close') $('sheetclose').click(); });
+
 $('ext').addEventListener('click', async (e) => {
+  const chat = e.target.closest('.openchat');
+  if (chat) { e.preventDefault(); openChat(chat.getAttribute('href'), chat.dataset.name); return; }
   const btn = e.target.closest('.rcarm');
   if (!btn || btn.disabled) return;
   const tab = btn.dataset.tab;

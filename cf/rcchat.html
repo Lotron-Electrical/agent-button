@@ -84,6 +84,11 @@
 const SECRET = "__SECRET__";
 const START  = "__START__";
 const Q = new URLSearchParams(location.search);
+// When the agents page hosts this chat in its sheet, "back" must close the sheet, not navigate
+// the frame to a second copy of the agents list.
+if (window.top !== window) {
+  document.querySelector('.back').addEventListener('click', (e) => { e.preventDefault(); parent.postMessage('rc-close', '*'); });
+}
 const ID   = Q.get('id') || '';
 const NAME = Q.get('name') || '';                       // /rc/get carries no name, so the URL does
 const CLAUDE = ID ? ('https://claude.ai/code/' + encodeURIComponent(ID)) : 'https://claude.ai/code';
