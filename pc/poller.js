@@ -536,9 +536,15 @@ function reviveWidget() {
   widgetRevivedAt = Date.now();
   if (!fs.existsSync(path.join(WIDGET_DIR, 'server.js'))) return;
   try {
-    const child = spawn(process.execPath, ['server.js'], { cwd: WIDGET_DIR, detached: true, stdio: 'ignore', windowsHide: true, env: SPAWN_ENV });
+    // Absolute path, not 'server.js' (2026-09-06): the orphan sweep keeps a node
+    // process alive only when its command line matches a pattern in
+    // ~/.claude/orphan-keep.txt, and the pattern here is 'usage-widget'. A bare
+    // relative entry file leaves the path out of the command line, so the sweep
+    // reaped the server it had just revived.
+    const serverJs = path.join(WIDGET_DIR, 'server.js');
+    const child = spawn(process.execPath, [serverJs], { cwd: WIDGET_DIR, detached: true, stdio: 'ignore', windowsHide: true, env: SPAWN_ENV });
     child.unref();
-    log('usage widget server was down; started node server.js (pid ' + child.pid + ')');
+    log('usage widget server was down; started node ' + serverJs + ' (pid ' + child.pid + ')');
   } catch (e) { log('usage widget revive failed: ' + e.message); }
 }
 
