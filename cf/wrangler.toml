@@ -3,6 +3,14 @@ main = "worker.js"
 compatibility_date = "2026-05-01"
 workers_dev = true
 
+# Joe's own worker (the voice-claude project's cf-proxy, which follows the
+# quick tunnel). It has to be a service binding, not a plain fetch: both
+# workers live on *.lotronelectrical.workers.dev and Cloudflare refuses a
+# same-zone worker-to-worker subrequest outright (error 1042).
+[[services]]
+binding = "CHIEF"
+service = "chief"
+
 [[durable_objects.bindings]]
 name = "QUEUE_DO"
 class_name = "QueueDO"

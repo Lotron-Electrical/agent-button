@@ -54,6 +54,18 @@
         background:linear-gradient(135deg,var(--accent2),var(--accent)); min-width:64px}
   .send:disabled{opacity:.45}
   .empty{color:var(--dim); text-align:center; margin:auto; font-size:14px; line-height:1.8}
+  /* voice: same two buttons, same loop, as every other chat in this app */
+  .vbtn{flex:none; width:46px; height:46px; border-radius:12px; border:1px solid var(--line);
+        background:var(--panel); color:var(--accent2); font-size:20px; line-height:1; padding:0}
+  .vbtn:active{border-color:var(--accent)}
+  .vbtn.listening{background:var(--ok); border-color:var(--ok); color:#0d1a0f; animation:vpulse 1.5s infinite}
+  .vbtn.speaking{background:var(--accent2); border-color:var(--accent2); color:#1a0f0a}
+  .vbtn.thinking{background:#d9a84f; border-color:#d9a84f; color:#1a0f0a}
+  .vbtn.on{color:var(--ok)}
+  .vbtn.off{color:var(--dim)}
+  @keyframes vpulse{0%,100%{box-shadow:0 0 0 0 rgba(95,184,122,.5)}50%{box-shadow:0 0 0 7px rgba(95,184,122,0)}}
+  .vrow{display:flex; align-items:center; gap:8px; padding:6px 12px 0; font-size:12px; color:var(--dim)}
+  .vrow .heard{flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-style:italic}
 </style>
 </head>
 <body>
@@ -64,11 +76,16 @@
   </header>
   <div id="log"></div>
   <div class="endlessbar" id="endlessbar"><div class="spin"></div><span class="lbl">Working…</span><button class="stopbtn" id="stopbtn">Stop</button></div>
+  <div class="vrow" id="vrow" hidden><span class="heard" id="heard"></span></div>
   <div class="composer">
     <textarea id="box" placeholder="Message this agent…" rows="1"></textarea>
+    <button class="vbtn" id="mic" type="button" title="talk" aria-label="talk">&#127908;</button>
+    <button class="vbtn on" id="spk" type="button" title="speak replies" aria-label="speak replies">&#128266;</button>
     <button class="send" id="send">Send</button>
   </div>
+  <audio id="player" playsinline preload="auto"></audio>
 
+<script src="__START__/voice.js"></script>
 <script>
 const SECRET = "__SECRET__";
 const START = "__START__";
@@ -107,6 +124,18 @@ function render(agent, messages){
   $('log').innerHTML = rows.join('');
   if (stick) $('log').scrollTop = $('log').scrollHeight;
   $('send').disabled = false;
+  speakNew(messages);
+}
+
+// Read out only what arrived while you were watching, never the backlog.
+let spokenUpTo = -1;
+function speakNew(messages){
+  const all = messages || [];
+  if (spokenUpTo < 0){ spokenUpTo = all.length; return; }
+  if (all.length <= spokenUpTo) return;
+  const fresh = all.slice(spokenUpTo).filter(m => m.role === 'agent').map(m => m.text);
+  spokenUpTo = all.length;
+  if (fresh.length && voice) voice.speakText(fresh.join(' '));
 }
 
 async function refresh(){
@@ -141,6 +170,37 @@ $('stopbtn').addEventListener('click', async ()=>{
 });
 $('box').addEventListener('keydown', (e)=>{ if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); send(); } });
 $('box').addEventListener('input', ()=>{ const b=$('box'); b.style.height='46px'; b.style.height=Math.min(120,b.scrollHeight)+'px'; });
+
+// ---- voice ----
+// The one loop, served from the PC at /p/<SECRET>/voice.js. If the PC is down
+// the module is a stub and this page just stays silent.
+function joeUrl(u){ return '/joe' + u + (u.indexOf('?') >= 0 ? '&' : '?') + 's=' + encodeURIComponent(SECRET); }
+let voice = null;
+if (window.Voice && window.Voice.supported && window.Voice.create) {
+  voice = window.Voice.create({
+    micButton: $('mic'),
+    audioEl: $('player'),
+    mapUrl: joeUrl,
+    ttsUrl: '/joe/tts',
+    authHeaders: () => ({ Authorization: 'Bearer ' + SECRET }),
+    onMode: (m) => {
+      $('mic').className = 'vbtn' + (m === 'off' ? '' : ' ' + m);
+      if (m === 'off'){ $('vrow').hidden = true; $('heard').textContent = ''; }
+    },
+    onInterim: (t) => { $('vrow').hidden = !t; $('heard').textContent = t || ''; },
+    onFinal: (text) => { $('box').value = text; send(); },
+    onError: (msg) => { if (msg) alert(msg); }
+  });
+  const paintSpk = () => {
+    $('spk').className = 'vbtn ' + (voice.speakOn() ? 'on' : 'off');
+    $('spk').innerHTML = voice.speakOn() ? '&#128266;' : '&#128263;';
+  };
+  paintSpk();
+  $('spk').addEventListener('click', () => { voice.setSpeak(!voice.speakOn()); paintSpk(); });
+} else {
+  $('mic').hidden = true;
+  $('spk').hidden = true;
+}
 
 refresh();
 setInterval(refresh, 2000);

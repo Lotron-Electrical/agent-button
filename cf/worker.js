@@ -19,6 +19,63 @@ const pngResp = (buf) =>
 // The one queue instance every request talks to.
 const queueStub = (env) => env.QUEUE_DO.get(env.QUEUE_DO.idFromName('main'));
 
+// ---- Joe (Auto Joe), the assistant Lloyd talks to ----
+// Joe runs on the PC (the voice-claude project) behind a stable worker of his
+// own that follows the quick tunnel. He is the front door of this app: Lloyd
+// speaks to Joe, Joe runs the agents. His page is NOT copied into this repo.
+// It is fetched live from that origin and served under /p/<SECRET>/joe with a
+// two-line shim injected, so there is one Joe UI and editing it on the PC is
+// enough. His device token is a worker secret (CHIEF_TOKEN); it is never in
+// this code and never reaches the phone.
+const CHIEF_ORIGIN = 'https://chief.lotronelectrical.workers.dev';
+
+// Always go through the CHIEF service binding. A plain fetch to that hostname
+// is a same-zone worker-to-worker subrequest, which Cloudflare rejects with
+// error 1042. The plain fetch stays as the fallback for a preview deploy that
+// has no binding.
+const chiefFetch = (env, path, init) =>
+  env.CHIEF ? env.CHIEF.fetch(new Request(CHIEF_ORIGIN + path, init))
+            : fetch(CHIEF_ORIGIN + path, init);
+
+// Header sets worth naming rather than repeating.
+const JOE_PASS_UP = ['content-type', 'range'];
+const JOE_PASS_DOWN = ['content-type', 'content-length', 'content-range', 'accept-ranges'];
+
+const joeOffline = (SECRET) => new Response(
+  `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Joe</title><style>body{margin:0;min-height:100dvh;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;
+background:#0d0d0d;color:#ece7e1;font-family:ui-monospace,Menlo,Consolas,monospace;text-align:center;padding:24px}
+p{margin:0;font-size:15px}small{color:#8a847c}a{color:#e0794f;text-decoration:none;border:1px solid #2a2a2a;border-radius:11px;padding:11px 16px}</style>
+<p>Joe is offline on the PC.</p><small>The agents below still work.</small><a href="/p/${SECRET}/agents">Agents</a>`,
+  { status: 200, headers: { 'content-type': 'text/html;charset=utf-8', 'cache-control': 'no-store' } });
+
+// Everything Joe's page asks for comes through here: /joe/chat, /joe/turn/...,
+// /joe/audio/....mp3, /joe/tts. In from the phone: the app SECRET, as a bearer
+// header or ?s= for the <audio> elements that cannot send one. Out to Joe: his
+// own device token. The ?s= is stripped so the app key never leaves the app.
+async function joeProxy(req, env, url) {
+  const token = env.CHIEF_TOKEN || '';
+  if (!token) return json({ error: 'Joe is not configured on this relay' }, 503);
+  const params = new URLSearchParams(url.search);
+  params.delete('s');
+  const qs = params.toString();
+  const target = url.pathname.slice('/joe'.length) + (qs ? '?' + qs : '');
+  const h = new Headers({ 'X-Chief-Token': token });
+  for (const k of JOE_PASS_UP) { const v = req.headers.get(k); if (v) h.set(k, v); }
+  const init = { method: req.method, headers: h, redirect: 'manual' };
+  if (req.method !== 'GET' && req.method !== 'HEAD') init.body = await req.arrayBuffer();
+  let r;
+  try { r = await chiefFetch(env, target, init); }
+  catch (e) { return json({ error: 'Joe is offline on the PC' }, 502); }
+  const out = new Headers();
+  for (const k of JOE_PASS_DOWN) { const v = r.headers.get(k); if (v) out.set(k, v); }
+  // An mp3 is immutable and gets re-fetched on every replay and every Range
+  // seek, so let the phone keep it. Everything else is live state.
+  out.set('cache-control', url.pathname.startsWith('/joe/audio/')
+    ? 'private, max-age=3600' : 'no-store');
+  return new Response(r.body, { status: r.status, headers: out });
+}
+
 // ---- endless mode ----
 const ENDLESS_PROTOCOL = '\n\n[ENDLESS MODE] Keep working autonomously until this task is fully solved. Make concrete progress every turn (read / edit / run / verify, do not just plan). When and ONLY when it is completely done and verified, include the exact marker [[SOLVED]] in your reply followed by a short summary. If it is not done yet, end your reply with the single concrete next step you will take, and you will automatically be asked to continue.';
 const CONTINUE_MSG = 'Continue working on the task now. Pick up exactly where you left off and make concrete progress this turn.';
@@ -137,6 +194,55 @@ export default {
     if (SECRET && p === '/p/' + SECRET + '/new') {
       const html = HTML.replaceAll('__SECRET__', SECRET).replaceAll('__START__', '/p/' + SECRET);
       return new Response(html, { headers: { 'content-type': 'text/html;charset=utf-8', 'cache-control': 'no-store' } });
+    }
+    // Joe's page (capability URL). Fetched live from the PC, never stored here.
+    if (SECRET && p === '/p/' + SECRET + '/joe') {
+      const token = env.CHIEF_TOKEN || '';
+      let html = null;
+      if (token) {
+        try {
+          const r = await chiefFetch(env, '/', { headers: { 'X-Chief-Token': token } });
+          if (r.ok) html = await r.text();
+        } catch (e) { /* fall through to the offline card */ }
+      }
+      if (html === null) return joeOffline(SECRET);
+      // Two lines are all the page needs to run inside this app: where its
+      // relative paths go, and what to authenticate them with. index.html's
+      // own tok() reads both, so it still works unchanged on Joe's own URL.
+      const shim = '<script>window.__JOE_BASE=' + JSON.stringify('/joe')
+        + ';window.__JOE_AUTH=' + JSON.stringify(SECRET) + ';</script>';
+      // Not /joe/voice.js: a <script src> cannot send the bearer header the
+      // proxy wants, and the capability URL already carries its own key.
+      html = html.replace('src="/voice.js"', 'src="/p/' + SECRET + '/voice.js"');
+      const at = html.indexOf('<script');
+      html = at < 0 ? shim + html : html.slice(0, at) + shim + html.slice(at);
+      return new Response(html, { headers: { 'content-type': 'text/html;charset=utf-8', 'cache-control': 'no-store' } });
+    }
+    // The one voice loop, shared by Joe's page and the agent chat pages. It
+    // lives on the PC with Joe. If the PC is down the agent pages must still
+    // work, so the fallback is a stub that says "no voice here" rather than a
+    // dead <script src>.
+    if (SECRET && p === '/p/' + SECRET + '/voice.js') {
+      const token = env.CHIEF_TOKEN || '';
+      if (token) {
+        try {
+          const r = await chiefFetch(env, '/voice.js', { headers: { 'X-Chief-Token': token } });
+          if (r.ok) {
+            return new Response(r.body, { headers: {
+              'content-type': 'application/javascript; charset=utf-8',
+              'cache-control': 'private, max-age=60'
+            } });
+          }
+        } catch (e) { /* fall through to the stub */ }
+      }
+      return new Response('window.Voice={supported:false,create:function(){return null;}};',
+        { headers: { 'content-type': 'application/javascript; charset=utf-8', 'cache-control': 'no-store' } });
+    }
+    // Joe's API, proxied. Audio elements authenticate with ?s= because they
+    // cannot send a header; everything else uses the bearer token.
+    if (p === '/joe' || p.startsWith('/joe/')) {
+      if (!authed()) return json({ error: 'unauthorized' }, 401);
+      return joeProxy(req, env, url);
     }
     // agent dashboard page (capability URL)
     if (SECRET && p === '/p/' + SECRET + '/agents') {

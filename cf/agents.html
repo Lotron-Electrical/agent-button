@@ -202,6 +202,12 @@
   .tile.off .tstate{color:var(--accent2)}
   .tile.off .rcdot{background:var(--accent2); box-shadow:0 0 8px var(--accent2)}
   .tile .rcdot{position:absolute; top:10px; right:10px; width:8px; height:8px; border-radius:50%}
+  /* Joe is pinned first and looks like the primary action he is. Dark label on
+     the bright fill, pinned with link-state specificity so the global a rule
+     cannot turn it orange-on-orange. */
+  .tile.joe{background:linear-gradient(135deg,var(--accent2),var(--accent)); border-color:transparent}
+  .tile.joe, .tile.joe:link, .tile.joe:visited{color:#1a0f0a}
+  .tile.joe .tstate{color:#1a0f0a; opacity:.75}
   .tile.arming .tstate{color:var(--warn)}
   .tile.failed .tstate{color:var(--err)}
   /* remote-control state, at a glance, on every terminal card */
@@ -249,7 +255,9 @@
   <div id="sheet" aria-hidden="true">
     <div class="bar"><button id="sheetclose" type="button">‹ Agents</button><span class="sname" id="sheetname"></span></div>
     <div class="spin"><i></i></div>
-    <iframe id="sheetframe" title="agent chat"></iframe>
+    <!-- allow: the sheet hosts Joe and the voice-enabled agent chats, and a
+         cross-document iframe gets no microphone and no autoplay without it. -->
+    <iframe id="sheetframe" title="agent chat" allow="microphone; autoplay"></iframe>
   </div>
 
 <script>
@@ -555,7 +563,12 @@ function renderGrid(external, agents, rcarm){
   }));
   $('extlabel').style.display = 'none';
   $('list').innerHTML = '';
-  lastTiles = tiles.length ? tiles : ['<a class="tile" href="'+START+'/new"><span class="tname">New agent</span></a>'];
+  // Joe is always first and always there, whether or not any agent is running:
+  // he is who Lloyd talks to, and he is the one who starts the others.
+  const joe = '<a class="tile joe openchat" href="'+START+'/joe" data-name="Joe">'+
+              '<span class="tname">Joe</span><span class="tstate">assistant</span></a>';
+  lastTiles = [joe].concat(tiles.length ? tiles
+    : ['<a class="tile" href="'+START+'/new"><span class="tname">New agent</span></a>']);
   drawPage();
 }
 
