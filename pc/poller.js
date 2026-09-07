@@ -697,7 +697,7 @@ async function runArm(it) {
   try {
     fs.mkdirSync(RC_ARM_DIR, { recursive: true });
     fs.writeFileSync(req, JSON.stringify({ id, tab: it.tab, name: it.name || it.tab, cmd: it.cmd || null, ts: Date.now() }));
-    log((it.cmd === 'rename' ? 'rc-rename: ' : 'rc-arm: ') + 'requested "' + it.tab + '" as "' + (it.name || it.tab) + '"');
+    log((it.cmd ? 'rc-' + it.cmd + ': ' : 'rc-arm: ') + 'requested "' + it.tab + '" as "' + (it.name || it.tab) + '"');
     const until = Date.now() + RC_ARM_TIMEOUT_MS;
     while (Date.now() < until) {
       await new Promise((r) => setTimeout(r, 1500));

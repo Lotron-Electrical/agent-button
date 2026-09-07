@@ -436,6 +436,10 @@ export default {
       if (!authed()) return json({ error: 'unauthorized' }, 401);
       return queueStub(env).fetch('https://do/rcarm', { method: 'POST', body: await req.text() });
     }
+    if (p === '/rc/close' && method === 'POST') {              // phone or Joe: close a finished terminal agent
+      if (!authed()) return json({ error: 'unauthorized' }, 401);
+      return queueStub(env).fetch('https://do/rcclose', { method: 'POST', body: await req.text() });
+    }
     if (p === '/rc/armnext') {                                 // poller: drain queued arm requests
       if (!authed()) return json({ error: 'unauthorized' }, 401);
       return queueStub(env).fetch('https://do/rcarmnext', { method: 'POST' });
@@ -729,6 +733,21 @@ export class QueueDO {
       const keys = Object.keys(al); if (keys.length > 200) for (const k of keys.slice(0, keys.length - 200)) delete al[k];
       await this.storage.put('aliases', al);
       return json({ ok: true });
+    }
+    if (op === 'rcclose') {
+      // A finished agent left open is a husk that costs a window and a context slot,
+      // so closing is a first-class command. It rides the arm queue like rename: the
+      // elevated RC daemon resolves the tab to its pid and tears the tab down.
+      const b = await request.json();                       // {tab}
+      const tab = String(b.tab || '').trim();
+      if (!tab) return json({ error: 'tab required' }, 400);
+      const q = (await this.storage.get('rcarmq')) || [];
+      if (!q.some((x) => x.tab === tab && x.cmd === 'close')) {
+        q.push({ id: crypto.randomUUID().slice(0, 8), tab, name: tab, cmd: 'close', ts: Date.now() });
+        await this.storage.put('rcarmq', q.slice(-20));
+      }
+      this.wake('rcarm');
+      return json({ ok: true, queued: true });
     }
     if (op === 'rcarmresult') {
       const b = await request.json();                       // {tab, ok, detail, cmd?}
