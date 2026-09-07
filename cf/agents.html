@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
 <meta name="theme-color" content="#0d0d0d" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
@@ -141,10 +141,14 @@
   .srow.two .g .val{min-width:0; flex:none; font-size:11px}
   /* Fixed page: cols x rows tiles, every one on screen. More agents than that = more pages,
      swiped or tapped through with the dots. The layout is the user's choice (header button). */
-  body.gridview #ext{flex:1; min-height:0; display:grid; grid-template-columns:repeat(var(--cols,2),1fr); grid-template-rows:repeat(var(--rows,3),1fr); gap:12px; padding:4px 0; touch-action:pan-y}
+  body.gridview #ext{flex:1; min-height:0; display:grid; grid-template-columns:repeat(var(--cols,2),1fr); grid-template-rows:repeat(var(--rows,3),minmax(0,1fr)); gap:var(--tgap,12px); padding:4px 0; touch-action:pan-y}
   body.gridview #ext:empty{display:none}
-  body.gridview[data-cols="3"] .tile .tname{font-size:12px}
-  body.gridview[data-cols="3"] .tile{padding:8px; gap:5px}
+  /* Tile text is sized from the row height (fitGrid below sets --tfs/--tss/--tpad), so a 2x4 or a
+     3x3 on a short phone shrinks its labels instead of pushing the last row off screen. */
+  body.gridview .tile{padding:var(--tpad,12px); gap:var(--tgapin,8px)}
+  body.gridview .tile .tname{font-size:var(--tfs,15px); -webkit-line-clamp:var(--tlines,3)}
+  body.gridview .tile .tstate{font-size:var(--tss,11px)}
+  body.gridview[data-cols="3"] .tile .tname{overflow-wrap:anywhere}
   .layoutbtn{font:inherit; cursor:pointer; background:none}
   /* Loading: the page draws its shape at once (grey tiles, shimmering) and real tiles fade in
      over it, so a slow relay reads as "loading", never as "broken" or "empty". */
@@ -297,6 +301,7 @@ function renderStats(st, compact){
     // Host only: with the layout and New buttons alongside, uptime made the title wrap.
     if (sub) sub.textContent = '// '+(st.host||'PC')+(fresh?'':' · offline');
     keepStripPane();
+    if (typeof fitGrid === 'function') fitGrid();   // the strip above the grid may have just appeared
     return;
   }
   const fresh = (Date.now()-st.ts) < 20000;
@@ -472,7 +477,36 @@ function applyLayout(){
   document.body.style.setProperty('--rows', r);
   document.body.dataset.cols = c;
   $('layoutbtn').textContent = c + '×' + r;
+  fitGrid();
 }
+// The grid must never scroll: whatever layout is chosen, every row is on screen. 100dvh lied on
+// the phone (the viewport ran under Android's nav bar and the third row of a 3x3 was cut off), so
+// the grid height is measured, not assumed: visible height (visualViewport when the browser has
+// it) minus where the grid starts minus what sits under it (pager, bottom padding). Card height is
+// that divided by the rows, and the tile text scales down with the card so it still fits.
+function fitGrid(){
+  if (!document.body.classList.contains('gridview')) return;
+  const ext = $('ext'), r = LAYOUTS[layoutIdx][1];
+  const vh = (window.visualViewport && window.visualViewport.height) || window.innerHeight || document.documentElement.clientHeight;
+  const top = ext.getBoundingClientRect().top + (window.visualViewport ? window.visualViewport.offsetTop : 0);
+  const cs = getComputedStyle(document.body);
+  const below = $('pager').offsetHeight + (parseFloat(cs.paddingBottom) || 0);
+  const h = Math.floor(vh - top - below);
+  if (!(h > 60)) return;                                   // not laid out yet; the next call will do
+  ext.style.flex = 'none'; ext.style.height = h + 'px';
+  const gap = h < 420 ? 8 : 12;
+  const card = (h - 8 - gap * (r - 1)) / r;                // 8 = the grid's own 4px top + bottom padding
+  const st = document.body.style;
+  st.setProperty('--tgap', gap + 'px');
+  st.setProperty('--tfs', Math.max(10, Math.min(15, Math.round(card / 13))) + 'px');
+  st.setProperty('--tss', Math.max(8, Math.min(11, Math.round(card / 18))) + 'px');
+  st.setProperty('--tpad', (card < 120 ? 6 : card < 170 ? 8 : 12) + 'px');
+  st.setProperty('--tgapin', (card < 120 ? 3 : card < 170 ? 5 : 8) + 'px');
+  st.setProperty('--tlines', card < 110 ? 2 : 3);
+}
+window.addEventListener('resize', fitGrid);
+if (window.visualViewport) window.visualViewport.addEventListener('resize', fitGrid);
+window.addEventListener('orientationchange', () => setTimeout(fitGrid, 80));
 $('layoutbtn').addEventListener('click', () => {
   layoutIdx = (layoutIdx + 1) % LAYOUTS.length;
   try { localStorage.setItem('agents.layout', String(layoutIdx)); } catch(_){}
@@ -524,6 +558,7 @@ function drawPage(){
       + Array.from({length: pages}, (_, i) => '<button class="pdot'+(i===page?' on':'')+'" data-page="'+i+'" aria-label="page '+(i+1)+'"></button>').join('')
       + '<button class="parrow" data-go="1"'+(page===pages-1?' disabled':'')+'>›</button>'
     : '';
+  fitGrid();   // the pager under the grid just changed height
 }
 $('pager').addEventListener('click', (e) => {
   const d = e.target.closest('.pdot'); const a = e.target.closest('.parrow');
